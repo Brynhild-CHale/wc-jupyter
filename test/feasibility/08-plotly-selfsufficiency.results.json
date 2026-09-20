@@ -1,12 +1,12 @@
 {
   "meta": {
     "port": 8933,
-    "root": "/var/folders/cn/nd2qmx3d74x_mfz6q2kqfh_c0000gn/T/wc-jpy-selfsuf-nEfvDB",
+    "root": "/var/folders/cn/nd2qmx3d74x_mfz6q2kqfh_c0000gn/T/wc-jpy-selfsuf-yD6zqk",
     "chrome": "/Users/dev-hale/.cache/puppeteer/chrome/mac_arm-151.0.7922.77/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-    "kernel": "feb77d6c-d67e-411f-94dc-9379bd8da391",
+    "kernel": "2b34b3a8-a0fe-4926-843d-f5003b928f2c",
     "node": "v26.9.0",
-    "started": "2026-09-20T22:10:38.964Z",
-    "ms": 30944,
+    "started": "2026-09-20T22:14:37.889Z",
+    "ms": 28954,
     "fails": 2
   },
   "payloads": {
@@ -831,6 +831,13 @@
         "data",
         "layout"
       ]
+    },
+    "scatter_sizes": {
+      "python_default_separators": 7306,
+      "python_compact_separators": 6674,
+      "fig_to_json": 6674,
+      "node_compact": 6646,
+      "iopub_frame": 7958
     },
     "geo": {
       "data": [
@@ -2414,7 +2421,7 @@
   "python": {
     "env": {
       "python": "3.14.6",
-      "prefix": "/Users/dev-hale/.cache/uv/builds-v0/.tmpZtj6r2",
+      "prefix": "/Users/dev-hale/.cache/uv/builds-v0/.tmpqso1Yw",
       "plotly": "7.1.0",
       "default_renderer": "plotly_mimetype",
       "renderers": [
@@ -2478,7 +2485,7 @@
           "bytes": 115
         }
       ],
-      "labext_root": "/Users/dev-hale/.cache/uv/builds-v0/.tmpZtj6r2/share/jupyter/labextensions",
+      "labext_root": "/Users/dev-hale/.cache/uv/builds-v0/.tmpqso1Yw/share/jupyter/labextensions",
       "labext": [
         "jupyterlab-plotly",
         "jupyterlab_pygments"
@@ -2530,7 +2537,7 @@
       "script_tags": 1,
       "has_newPlot": true,
       "urls": [],
-      "head": "<div style=\"height:300px; width:420px;\">                            <div id=\"65ae2273-8414-43de-ad66-410050d37822\" class=\"plotly-graph-div\" style=\"height:100%; width:100%;\"></div>            <script> "
+      "head": "<div style=\"height:300px; width:420px;\">                            <div id=\"2f188999-c902-40b3-9fb7-e6d41c6c55d2\" class=\"plotly-graph-div\" style=\"height:100%; width:100%;\"></div>            <script> "
     }
   },
   "browser": {
@@ -2552,7 +2559,7 @@
           "newPlot_type": "function",
           "arg_count": 2,
           "ok": true,
-          "ms": 25,
+          "ms": 22,
           "svg": 14,
           "canvas": 0,
           "trace_nodes": 1,
@@ -2639,7 +2646,7 @@
           "newPlot_type": "function",
           "arg_count": 1,
           "ok": true,
-          "ms": 24,
+          "ms": 23,
           "svg": 14,
           "canvas": 0,
           "trace_nodes": 1,
@@ -2718,7 +2725,7 @@
           "newPlot_type": "function",
           "arg_count": 2,
           "ok": true,
-          "ms": 22,
+          "ms": 23,
           "svg": 14,
           "canvas": 0,
           "trace_nodes": 1,
@@ -2877,7 +2884,7 @@
           "arg_count": 2,
           "ping_status": "failed TypeError",
           "ok": true,
-          "ms": 1095,
+          "ms": 662,
           "svg": 12,
           "canvas": 0,
           "trace_nodes": 1,
@@ -3054,7 +3061,7 @@
           "newPlot_type": "function",
           "arg_count": 2,
           "ok": true,
-          "ms": 26,
+          "ms": 27,
           "svg": 14,
           "canvas": 0,
           "trace_nodes": 1,
@@ -3238,7 +3245,7 @@
     },
     {
       "label": "probe root_dir",
-      "value": "/var/folders/cn/nd2qmx3d74x_mfz6q2kqfh_c0000gn/T/wc-jpy-selfsuf-nEfvDB"
+      "value": "/var/folders/cn/nd2qmx3d74x_mfz6q2kqfh_c0000gn/T/wc-jpy-selfsuf-yD6zqk"
     },
     {
       "label": "pane mime ladder today",
@@ -3254,11 +3261,11 @@
     },
     {
       "label": "jupyter_server up in",
-      "value": "0.8s   version {\"connections\":0,\"kernels\":0,\"last_activity\":\"2026-09-20T22:10:38.464501Z\",\"star"
+      "value": "0.8s   version {\"connections\":0,\"kernels\":0,\"last_activity\":\"2026-09-20T22:14:37.389585Z\",\"star"
     },
     {
       "label": "kernel",
-      "value": "feb77d6c-d67e-411f-94dc-9379bd8da391"
+      "value": "2b34b3a8-a0fe-4926-843d-f5003b928f2c"
     },
     {
       "label": "python / plotly",
@@ -3277,10 +3284,6 @@
       "value": "7.8 KiB (one display_data message, JSON text frame)"
     },
     {
-      "label": "python json.dumps of the same payload",
-      "value": "default separators 6.5 KiB (node compact) — see notes: python's default \", \"/\": \" adds ~10%"
-    },
-    {
       "label": "template share of the payload",
       "value": "6.3 KiB of 6.5 KiB = 97.4%"
     },
@@ -3291,6 +3294,10 @@
     {
       "label": "text/plain fallback in the bundle",
       "value": "ABSENT — a non-rendering pane has nothing to show"
+    },
+    {
+      "label": "same payload, four ways to count it",
+      "value": "python json.dumps default 7306 B | python compact 6674 B | node JSON.stringify 6646 B | whole iopub frame 7958 B"
     },
     {
       "label": "scattergeo payload",
@@ -3306,7 +3313,7 @@
     },
     {
       "label": "labextensions dir",
-      "value": "/Users/dev-hale/.cache/uv/builds-v0/.tmpZtj6r2/share/jupyter/labextensions -> jupyterlab-plotly,jupyterlab_pygments"
+      "value": "/Users/dev-hale/.cache/uv/builds-v0/.tmpqso1Yw/share/jupyter/labextensions -> jupyterlab-plotly,jupyterlab_pygments"
     },
     {
       "label": "labextension payload",

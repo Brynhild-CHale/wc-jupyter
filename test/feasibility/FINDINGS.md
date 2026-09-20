@@ -6,6 +6,11 @@ implemented — this exists so that whoever implements it starts from measuremen
 
 Re-verify with the probes in this directory (`README.md` says what each one needs).
 
+Every headline claim was independently re-measured by a second probe that shared no code with
+the first. **Three of twelve came back qualified**, and two of those hit the *summary* rather
+than the measurement — a single server row written up as if it held everywhere. Where that
+happened it is called out inline. Read the verdict column, not the section title.
+
 **Versions this was measured on.** `jupyter_server` 2.21.1 and 2.21.0, `jupyterlab` 4.6.3,
 `tornado` 6.5.10 / 6.5.9, `nbconvert` 7.17.1, `plotly` 7.1.0 (plotly.js 4.1.1), `altair`
 6.3.0 / 5.5.0 / 4.2.2, `bokeh` 3.10.0, `ipywidgets` 8.x, Node 24/26, Chrome.
@@ -22,9 +27,9 @@ renderer bytes to it**, and every route the design assumed turns out to be close
    `get_store`).
 2. It cannot travel through the **kernel** without chunking (a 4.96 MB payload is *silently
    discarded* by the iopub rate limit).
-3. It cannot be **fetched from the Jupyter server** on the machine as configured, because the
-   route that serves extensions belongs to `jupyterlab_server`, which the live server does not
-   have installed.
+3. It cannot be **fetched from the Jupyter server** on this machine at all. The route belongs
+   to `jupyterlab_server`, and of the three server shapes measured only a healthy Lab install
+   serves it: the live pane's bare server 404s and the brew install 500s on every static file.
 4. Even where that route exists, what it serves is a **module-federation container**, not a
    library — loading it defines `rspackChunkjupyterlab_plotly`, not `window.Plotly`.
 
@@ -70,22 +75,53 @@ Gotcha for anyone writing a probe: the export JSON-encodes pane HTML, so `<ifram
 
 ## 3. Serving assets from Jupyter (`01-server-assets.mjs`)
 
+**This section was corrected after independent re-verification.** The first pass recorded
+"extension assets are served without a token — CONFIRMED, 200 on all five token variants".
+That generalised **one server shape into all of them**. Measured across three, on
+`/lab/extensions/jupyterlab-plotly/static/remoteEntry.<hash>.js`, all five token variants
+(none / bad header / good header / bad `?token=` / good `?token=`):
+
+| server shape | result |
+|---|---|
+| `jupyterlab` 4.6.3 + `jupyter_server` 2.21.1 + `tornado` 6.5.10 | **200** ×5 — the claim holds here |
+| brew: `jupyterlab` 4.6.3 + `jupyter_server` 2.21.0 + `tornado` 6.5.9 | **500** ×5 |
+| bare `jupyter_server` 2.21.1, no jupyterlab (**the live pane's server**) | **404** ×5 |
+
+So the transport works on a *healthy Lab install* and on nothing else. Treat "assets are
+reachable" as a runtime probe, not an assumption.
+
 | claim | verdict | measured |
 |---|---|---|
-| Extension assets are served **without a token** | **CONFIRMED** | 200 on all five token variants; `FileFindHandler.get/head` carry `@allow_unauthenticated` |
-| The path is `/labextensions/<name>/...` | **REFUTED** | 404. It is **`/lab/extensions/<name>/static/<file>`** |
-| A null-origin frame can `fetch()` the asset | **REFUTED** | 200 but `access-control-allow-origin` **absent**; OPTIONS preflight → 405 |
+| Served without a token, **where the route exists at all** | **CONFIRMED** | cold process, first-ever request, raw `http` with only `accept`/`host` → 200, `application/javascript`, body starts `var _JUPYTERLAB;` |
+| `--ServerApp.allow_unauthenticated_access=False` closes it | **REFUTED** | still 200. The `@allow_unauthenticated` decorator beats the trait — verified the trait *is* effective elsewhere (on the bare server it flipped a 404 into `302 → /login`). More config-robust than first recorded. |
+| The path is `/labextensions/<name>/...` | **REFUTED** | 404 everywhere. It is `/lab/extensions/<name>/...`, and it is **base_url-relative**: under `--ServerApp.base_url=/jpy/`, `/jpy/lab/extensions/…` → 200 and `/lab/extensions/…` → 404 |
+| A null-origin frame can `fetch()` the asset | **REFUTED** | 200 but `access-control-allow-origin` absent (`allow_origin` defaults to `''`); OPTIONS preflight → 405 |
 | A null-origin frame can `<script src>` it | **CONFIRMED** | 200, `application/javascript`, `nosniff` satisfied |
 | A prebuilt labextension contains a UMD bundle | **REFUTED** | 6 files, 4,856,975 B; `remoteEntry` is a federation container, the 4.8 MB chunk only pushes onto `rspackChunkjupyterlab_plotly` |
 | The server serves files from inside a Python package | **REFUTED** | no route to `plotly/package_data/plotly.min.js` |
 
-Two consequences worth pinning:
+**The JS box can never be an iframe pointed *at* Jupyter.** Jupyter responses carry
+`content-security-policy: frame-ancestors 'self'`, so a frame whose `src` is a Jupyter URL is
+refused. The box must be `srcdoc` (or a blob) that pulls the script in — which is what the
+rest of this document assumes, but it is a constraint rather than a preference.
 
-- **Derive the asset base, never hardcode it.** It comes from the `/lab` page's `page_config`
-  (`fullLabextensionsUrl`), and `base_url` is not always `/` (JupyterHub, `--ServerApp.base_url`).
-- **The no-token result is load-bearing and fragile.** `@allow_unauthenticated` sits above an
-  upstream `# TODO: create an allow-list of files`. If that TODO lands, this transport dies.
-  Pin the assumption to a version range and re-probe on upgrade.
+**The brew install is broken, and precisely.** `FileFindHandler` 500s on every static file —
+even `/static/favicons/favicon.ico`, so JupyterLab itself will not load. Pinned by a
+five-cell matrix:
+
+| `jupyter_server` | `tornado` | static |
+|---|---|---|
+| 2.21.0 | 6.5.8 | OK |
+| 2.21.0 | **6.5.9** | **BROKEN** — `AttributeError: 'FileFindHandler' object has no attribute 'allowed_symlink_directory'` |
+| 2.21.0 | 6.5.10 | OK |
+| 2.21.1 | 6.5.9 | OK |
+| 2.21.1 | 6.5.10 | OK |
+
+Exactly one broken pairing, and brew ships it. tornado ≥ 6.5.9 dereferences
+`allowed_symlink_directory` in `validate_absolute_path`; `jupyter_server` 2.21.0's
+`FileFindHandler.initialize` overrides `initialize` without calling `super()` and never sets
+it. Remedy: bump tornado to 6.5.10 or `jupyter_server` to 2.21.1 inside
+`/opt/homebrew/Cellar/jupyterlab/4.6.3/libexec`.
 
 ## 4. Installing from chat (`02-kernel-install.mjs`)
 
@@ -151,7 +187,9 @@ Settle the budget question — raise it, give vendor payloads their own, or down
 ## 7. End-to-end, in a real browser (`08-plotly-selfsufficiency.mjs`)
 
 A probe drove headless Chrome 151, served `plotly/package_data/plotly.min.js` off disk, and
-loaded it into a null-origin sandboxed iframe. **The design works:**
+loaded it into a null-origin sandboxed iframe, then **drew the figures**. The scatter case is
+solid. "Self-sufficient" is *not* true unconditionally — geo traces are a hard counterexample,
+below.
 
 | claim | verdict | measured |
 |---|---|---|
@@ -199,6 +237,9 @@ loaded it into a null-origin sandboxed iframe. **The design works:**
 
 ## The design these findings point to
 
+- **Probe the transport at runtime, never assume it.** Whether assets are reachable depends on
+  the server shape, the `base_url` and the `jupyter_server`/`tornado` pairing — three things
+  that vary per machine and none of which the pack controls.
 - **Transport: the service serves the bytes.** Ask the kernel for the on-disk path and version
   (`plotly/package_data/plotly.min.js`, 4.59 MiB, defines `window.Plotly`) and have the
   `jpy-notebook` service serve that file over its own route, then `<script src>` it into the
