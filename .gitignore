@@ -1,0 +1,10 @@
+node_modules/
+.web-chat/
+.DS_Store
+*.log
+.env
+.env.*
+
+# Harness scratch. The suites write notebooks into $JPY_FIXTURES (default
+# /tmp/wc-jpy-live) and clean up after themselves; nothing here belongs to the repo.
+test-output/

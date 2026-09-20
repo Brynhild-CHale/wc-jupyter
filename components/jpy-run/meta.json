@@ -1,0 +1,16 @@
+{
+  "name": "jpy-run",
+  "description": "A compact execution console for a notebook already open in a `jpy-notebook` pane: kernel status and controls (Run all / Interrupt / Restart / Reconnect), a per-cell run ledger showing which cells ran, in what order, how long each took and whether it failed, and one-click jumps to the cells that errored. Reach for it when the user is RUNNING a notebook rather than reading one - re-running an analysis, watching a long cell, hunting which cell broke - and when the notebook pane itself is long enough that the controls have scrolled away. SHIPS NO SERVICE. It is a pure store renderer and is INERT ON ITS OWN: it reads `jpy_conn`, `jpy_nb` and `jpy_out_<cellId>`, all of which are published by the `jpy-notebook` pane's service, so a `jpy-notebook` pane must be on the SAME graph node or this pane shows only an explanation of what is missing. It writes the same control key `jpy_ctl { seq, op }` that jpy-notebook reads - ops 'run' {cell}, 'run-all', 'interrupt', 'restart', 'connect' {index}, 'discover' - which is a CONTROL key, not a signal: the user running cells never wakes Claude. Mount it with `params.routing:'none'`; a run console is the noisy-pane case, and without it every click coalesces into the queue rail as generic activity the user did not ask to send. Timings are measured in the PANE from the transitions it observes on `jpy_out_<id>`, so they are wall-clock from the moment this pane saw the cell go busy - close to the kernel's own number but not the kernel's number, and a cell that was already running when this pane mounted reports no duration rather than a wrong one.",
+  "params_schema": {
+    "type": "object",
+    "properties": {
+      "notebook": {
+        "type": "string",
+        "maxLength": 4096,
+        "title": "Notebook to follow",
+        "description": "Which tab of the jpy-notebook pane to follow, as its absolute path or bare filename. Omit to follow whichever tab is active - which is almost always what you want, since the two panes then move together.",
+        "examples": ["analysis.ipynb"]
+      }
+    }
+  }
+}

@@ -1,0 +1,249 @@
+<style>
+  :host, .run {
+    --jpy-in:    var(--wc-accent, #303f9f);
+    --jpy-out:   var(--wc-gold, #d84315);
+    --jpy-well:  var(--wc-panel-bg, #f7f7f7);
+    --jpy-line:  var(--wc-border, #e0e0e0);
+    --jpy-muted: var(--wc-muted, #757575);
+    --jpy-green: var(--wc-green, #2e7d32);
+  }
+  .run { font: 13px/1.5 var(--wc-font, system-ui, sans-serif); color: var(--wc-fg, #212121); }
+  .head { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+          padding: .45rem .6rem; border-bottom: 1px solid var(--jpy-line); }
+  .head .who { font-weight: 600; margin-right: auto; max-width: 24ch;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; cursor: pointer; padding: .25rem .6rem;
+           border: 1px solid var(--jpy-line); border-radius: var(--wc-radius-sm, 4px);
+           background: var(--wc-panel-bg, #fff); color: inherit; }
+  button:disabled { opacity: .45; cursor: default; }
+  .status { display: flex; gap: .4rem; align-items: center; padding: .4rem .6rem;
+            border-bottom: 1px solid var(--jpy-line); font-size: 12px; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--jpy-muted); flex: none; }
+  .dot.ok { background: var(--jpy-green); } .dot.bad { background: var(--jpy-out); }
+  .muted { color: var(--jpy-muted); }
+  .ledger { list-style: none; margin: 0; padding: .25rem 0 1rem; }
+  .row { display: grid; grid-template-columns: 1.1rem 3.2rem 1fr auto auto; gap: .5rem;
+         align-items: center; padding: .22rem .6rem; border-bottom: 1px solid var(--jpy-line); }
+  .row:last-child { border-bottom: none; }
+  .row.err { background: color-mix(in srgb, var(--jpy-out) 10%, transparent); }
+  .row .n { font: 11px var(--wc-mono, ui-monospace, monospace); color: var(--jpy-in); text-align: right; }
+  .row .src { font: 11.5px/1.35 var(--wc-mono, ui-monospace, monospace);
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--jpy-muted); }
+  .row.done .src { color: inherit; }
+  .row .ms { font: 11px var(--wc-mono, ui-monospace, monospace); color: var(--jpy-muted); }
+  .pip { width: .5rem; height: .5rem; border-radius: 50%; background: var(--jpy-line); }
+  .pip.busy { background: var(--jpy-in); animation: pulse 1s ease-in-out infinite; }
+  .pip.ok   { background: var(--jpy-green); }
+  .pip.err  { background: var(--jpy-out); }
+  .pip.saved{ background: var(--jpy-line); box-shadow: inset 0 0 0 1px var(--jpy-muted); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  /* data-no-persist: form_state keys embed the element's enumeration index, and
+     this note is transient — it should never be rehydrated onto a later run. */
+  .tell { display: flex; gap: .35rem; padding: .4rem .6rem; border-bottom: 1px solid var(--jpy-line); }
+  .tell textarea { flex: 1; font: inherit; padding: .3rem .45rem; resize: vertical;
+                   border: 1px solid var(--jpy-line); border-radius: var(--wc-radius-sm, 4px);
+                   background: var(--wc-panel-bg, #fff); color: inherit; }
+  .bar { height: 3px; background: var(--jpy-line); }
+  .bar > i { display: block; height: 100%; background: var(--jpy-in); transition: width .2s; }
+  .note { padding: .7rem .6rem; color: var(--jpy-muted); font-size: 12px; }
+  .note code { font: .95em var(--wc-mono, ui-monospace, monospace);
+               background: var(--jpy-well); padding: .1em .35em; border-radius: 3px; }
+  .errs { padding: .35rem .6rem; display: flex; gap: .35rem; flex-wrap: wrap; }
+  .errs button { font-size: 11px; padding: .1rem .45rem; color: var(--jpy-out);
+                 border-color: color-mix(in srgb, var(--jpy-out) 40%, var(--jpy-line)); }
+</style>
+
+<div class="run">
+  <div class="head">
+    <span class="who" id="who">—</span>
+    <button id="run-all">Run all</button>
+    <button id="run-all-tell">Run all + tell Claude</button>
+    <button id="interrupt">Interrupt</button>
+    <button id="restart">Restart</button>
+  </div>
+  <div class="status"><span class="dot" id="dot"></span><span id="state">waiting for jpy-notebook…</span>
+    <button id="reconnect" style="margin-left:auto">Reconnect</button></div>
+  <div class="tell" id="tell" hidden>
+    <textarea id="tell-note" data-no-persist rows="2"
+      placeholder="What should Claude check when the run finishes? (optional)"></textarea>
+    <button id="tell-send">Run all + send</button>
+  </div>
+  <div class="bar"><i id="bar" style="width:0"></i></div>
+  <div id="body"></div>
+</div>
+
+<script>
+  // Query through `root` — the pane's shadow root. document.* cannot see in here.
+  const $ = (id) => root.getElementById(id);
+  const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c; if (x != null) n.textContent = x; return n; };
+  // A STRICTLY MONOTONIC stamp, not a bare Date.now(). The service refuses a
+  // control write whose seq is <= the last one it applied — that is what stops
+  // a persisted op replaying after graph navigation — and Date.now() has
+  // millisecond resolution, so two writes in the same tick (an edit flush
+  // followed by a save, or one edit per dirty cell) collide and every one
+  // after the first is silently dropped. Measured: 100% of saves.
+  // Keeping the wall-clock floor preserves the replay guard; the +1 guarantees
+  // ordering within a tick.
+  let ctlSeq = 0;
+  const nextSeq = () => (ctlSeq = Math.max(Date.now(), ctlSeq + 1));
+  const ctl = (op, extra) => store.set({ jpy_ctl: { seq: nextSeq(), op, ...(extra || {}) } });
+
+  let nb = null, conn = null;
+  const outs = new Map();      // cellId -> latest jpy_out_<id>
+  const timing = new Map();    // cellId -> { started, ms }
+  const subscribed = new Set();
+
+  const follow = (params && params.notebook) ? String(params.notebook) : null;
+
+  function activeTab() {
+    if (!nb || !nb.tabs || !nb.tabs.length) return null;
+    if (follow) {
+      const m = nb.tabs.find((t) => t.path === follow || t.name === follow);
+      if (m) return m;
+    }
+    return nb.tabs.find((t) => t.id === nb.active) || nb.tabs[0];
+  }
+
+  function fmt(ms) {
+    if (ms == null) return "";
+    if (ms < 1000) return ms + "ms";
+    if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + "s";
+    return Math.floor(ms / 60000) + "m" + String(Math.round((ms % 60000) / 1000)).padStart(2, "0") + "s";
+  }
+
+  function render() {
+    const body = $("body");
+    body.replaceChildren();
+
+    // Inert without the service that publishes these keys. Say which pane is
+    // missing and how to get it, rather than rendering an empty console.
+    if (!nb) {
+      const n = el("div", "note");
+      n.append("Nothing to follow yet. This pane renders the store published by a ");
+      n.appendChild(el("code", null, "jpy-notebook"));
+      n.append(" pane, which must be on this same graph node. If one is mounted and still nothing appears, its service is probably waiting on a terminal approval: ");
+      n.appendChild(el("code", null, "claude-web-chat trust jpy-notebook"));
+      n.append(".");
+      body.appendChild(n);
+      $("bar").style.width = "0";
+      return;
+    }
+
+    const tab = activeTab();
+    $("who").textContent = tab ? tab.name : "—";
+    $("who").title = (tab && tab.path) || "";
+    if (!tab || tab.error) {
+      body.appendChild(el("div", "note", tab ? (tab.error + " — " + (tab.detail || "")) : "no notebook"));
+      return;
+    }
+
+    const code = (tab.cells || []).filter((c) => c.type === "code");
+    const errors = [];
+    let done = 0;
+
+    const list = el("ul", "ledger");
+    code.forEach((c, i) => {
+      const o = outs.get(c.id);
+      const state = o ? o.state : null;
+      if (state === "ok" || state === "error") done++;
+      if (state === "error") errors.push(c);
+
+      const row = el("li", "row" + (state === "error" ? " err" : "") + (state === "ok" || state === "error" ? " done" : ""));
+      row.appendChild(el("span", "pip " + (state === "busy" ? "busy" : state === "ok" ? "ok" : state === "error" ? "err" : state === "saved" ? "saved" : "")));
+      const count = o && o.exec_count != null ? o.exec_count : c.exec_count;
+      row.appendChild(el("span", "n", "[" + (state === "busy" ? "*" : count == null ? " " : count) + "]"));
+      // jpy_nb carries `head` — the first non-blank line — precisely so this
+      // pane never has to subscribe to cell source.
+      const first = c.head || "(empty cell)";
+      row.appendChild(el("span", "src", first));
+      const t = timing.get(c.id);
+      row.appendChild(el("span", "ms", state === "busy" && t ? fmt(Date.now() - t.started) : fmt(t && t.ms)));
+      const b = el("button", null, "Run");
+      b.onclick = () => ctl("run", { cell: c.id });
+      b.disabled = !(conn && conn.ok);
+      row.appendChild(b);
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+
+    if (errors.length) {
+      const strip = el("div", "errs");
+      strip.appendChild(el("span", "muted", errors.length + " failed:"));
+      for (const c of errors) {
+        const o = outs.get(c.id);
+        const e = (o.outputs || []).find((x) => x.kind === "error");
+        const b = el("button", null, (e && e.ename) || "error");
+        b.title = (e && e.evalue) || "";
+        b.onclick = () => ctl("run", { cell: c.id });   // re-run the failing cell
+        strip.appendChild(b);
+      }
+      body.appendChild(strip);
+    }
+
+    $("bar").style.width = code.length ? Math.round((done / code.length) * 100) + "%" : "0";
+  }
+
+  function renderStatus() {
+    const c = conn || {};
+    $("dot").className = "dot" + (c.ok ? " ok" : c.state === "error" || c.state === "no-server" ? " bad" : "");
+    $("state").textContent = c.ok
+      ? "kernel ready" + (c.kernel && c.kernel.name ? " — " + c.kernel.name : "")
+      : (c.state || "waiting for jpy-notebook…") + (c.error ? ": " + c.error : "");
+    for (const id of ["run-all", "interrupt", "restart"]) $(id).disabled = !c.ok;
+  }
+
+  $("run-all").onclick = () => ctl("run-all");
+  // Same split as jpy-notebook: Run all is the user's own, Run all + tell writes
+  // the DECLARED signal so it reaches the queue rail with their note. This pane
+  // does not declare jpy_ask itself — whoever mounts it declares the signal, and
+  // jpy-notebook already does, so the key is registered for the node either way.
+  $("run-all-tell").onclick = () => {
+    const box = root.getElementById("tell");
+    box.hidden = !box.hidden;
+    if (!box.hidden) root.getElementById("tell-note").focus();
+  };
+  $("tell-send").onclick = () => {
+    const note = root.getElementById("tell-note").value.trim();
+    const tab = activeTab();
+    ctl("run-all");
+    store.set({ jpy_ask: { seq: nextSeq(), notebook: tab && tab.path, cell: null, kind: "run-and-report", note: note || null } });
+    root.getElementById("tell-note").value = "";
+    root.getElementById("tell").hidden = true;
+  };
+  $("interrupt").onclick = () => ctl("interrupt");
+  $("restart").onclick = () => { timing.clear(); ctl("restart"); };
+  $("reconnect").onclick = () => ctl("discover");
+
+  store.subscribe("jpy_conn", (v) => { conn = v || null; renderStatus(); render(); });
+  store.subscribe("jpy_nb", (v) => {
+    nb = v || null;
+    for (const t of (nb && nb.tabs) || []) {
+      for (const c of t.cells || []) {
+        if (subscribed.has(c.id)) continue;
+        subscribed.add(c.id);
+        store.subscribe("jpy_out_" + c.id, (o) => {
+          if (!o) return;
+          // Wall-clock measured from the transitions THIS pane observes, which
+          // is close to the kernel's number but is not the kernel's number. A
+          // cell already running when we mounted has no start, so it reports no
+          // duration rather than a wrong one.
+          const prev = outs.get(c.id);
+          if (o.state === "busy" && (!prev || prev.state !== "busy")) timing.set(c.id, { started: Date.now(), ms: null });
+          else if (prev && prev.state === "busy" && o.state !== "busy") {
+            const t = timing.get(c.id);
+            if (t && t.started) t.ms = Date.now() - t.started;
+          }
+          outs.set(c.id, o);
+          render();
+        });
+      }
+    }
+    render();
+  });
+
+  // Ticks the elapsed time on a running cell. Cleared by the shell on unmount.
+  setInterval(() => { if ([...outs.values()].some((o) => o && o.state === "busy")) render(); }, 500);
+
+  renderStatus();
+  render();
+</script>

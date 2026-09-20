@@ -1,0 +1,12 @@
+{
+  "name": "wc-jupyter",
+  "version": "0.1.0",
+  "description": "Jupyter notebooks on the web-chat surface: open one or more .ipynb files as tabs in a single pane, see every cell and its real outputs rendered natively, and run cells against a Jupyter kernel the user is already serving. A companion run-console pane reads the same store and ships no service of its own. The pack's one host service speaks the Jupyter Server REST + WebSocket protocol directly with no Python and no npm dependencies, publishes `jpy_conn`, `jpy_nb` and per-cell `jpy_out_<id>`, It writes notebooks only through that server's contents API, only cell source, and refuses to save a notebook that changed on disk or that it is holding truncated.",
+  "requires": {
+    "web-chat": ">=0.7.0"
+  },
+  "components": [
+    "jpy-notebook",
+    "jpy-run"
+  ]
+}

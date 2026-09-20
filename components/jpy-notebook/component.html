@@ -1,0 +1,1049 @@
+<style>
+  /* Vanilla-Jupyter on purpose: the classic In[n]/Out[n] gutter, the grey code
+     well, the pink stderr band. Every colour goes through a --wc-* token with a
+     Jupyter default behind it, so the pane inherits the surface's theme (custom
+     properties cross the shadow boundary) without stopping looking like a
+     notebook. No webfont: --wc-mono is already the surface's monospace. */
+  :host, .nb {
+    --jpy-in:      var(--wc-accent, #303f9f);
+    --jpy-out:     var(--wc-gold, #d84315);
+    --jpy-well:    var(--wc-panel-bg, #f7f7f7);
+    --jpy-line:    var(--wc-border, #e0e0e0);
+    --jpy-fg:      var(--wc-fg, #212121);
+    --jpy-muted:   var(--wc-muted, #757575);
+    --jpy-err-bg:  color-mix(in srgb, var(--wc-gold, #d84315) 12%, transparent);
+    --jpy-gutter:  5.5rem;
+  }
+  .nb { font: 13px/1.5 var(--wc-font, system-ui, sans-serif); color: var(--jpy-fg); }
+  /* Must outrank every display: below. Anything this pane hides is hidden with
+     the attribute, so one rule is the whole contract. */
+  [hidden] { display: none !important; }
+  /* tabindex="-1" plus this: focusable by script so keyboard history works,
+     without drawing a focus ring on every click. */
+  .nb:focus { outline: none; }
+  /* An empty markdown cell used to be a transparent ~20px strip whose only
+     affordance was hidden until hover — create one, click away, and it was gone. */
+  .md:empty::before { content: "empty markdown cell — click Edit to write in it";
+    display: block; color: var(--jpy-muted); font-size: 12px; font-style: italic;
+    border: 1px dashed var(--jpy-line); border-radius: var(--wc-radius-sm, 4px); padding: .3rem .5rem; }
+  .bar { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+         padding: .45rem .6rem; border-bottom: 1px solid var(--jpy-line); }
+  .tabs { display: flex; flex-wrap: wrap; gap: .25rem; flex: 1 1 auto; min-width: 0; }
+  .tab { padding: .25rem .6rem; border: 1px solid var(--jpy-line); border-bottom: none;
+         border-radius: var(--wc-radius-sm, 4px) var(--wc-radius-sm, 4px) 0 0;
+         background: transparent; color: var(--jpy-muted); cursor: pointer;
+         font: inherit; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab[aria-selected="true"] { background: var(--jpy-well); color: var(--jpy-fg); font-weight: 600; }
+  .tab.bad { color: var(--jpy-out); }
+  .tab .x { margin-left: .35rem; opacity: .5; }
+  .tab .x:hover { opacity: 1; }
+  .picker { border-bottom: 1px solid var(--jpy-line); padding: .45rem .6rem; font-size: 12px; }
+  .picker .crumbs { display: flex; gap: .35rem; align-items: center; margin-bottom: .35rem; flex-wrap: wrap; }
+  .picker .crumbs code { font: 11px var(--wc-mono, ui-monospace, monospace); color: var(--jpy-muted); }
+  .picker ul { list-style: none; margin: 0; padding: 0; max-height: 11rem; overflow-y: auto;
+    border: 1px solid var(--jpy-line); border-radius: var(--wc-radius-sm, 4px); }
+  .picker li { padding: .2rem .5rem; cursor: pointer; display: flex; gap: .4rem; align-items: center; }
+  .picker li:hover { background: var(--jpy-well); }
+  .picker .mk { display: flex; gap: .35rem; margin-top: .4rem; align-items: center; }
+  .picker .mk input { flex: 1; font: inherit; padding: .25rem .4rem; border: 1px solid var(--jpy-line);
+    border-radius: var(--wc-radius-sm, 4px); background: var(--wc-panel-bg, #fff); color: inherit; }
+  .picker .why { color: var(--jpy-out); margin-top: .3rem; }
+  .empty { padding: 2rem .6rem; text-align: center; color: var(--jpy-muted); }
+  .empty button { margin: 0 .2rem; }
+  button { font: inherit; cursor: pointer; padding: .25rem .6rem; border-radius: var(--wc-radius-sm, 4px);
+           border: 1px solid var(--jpy-line); background: var(--wc-panel-bg, #fff); color: inherit; }
+  button:disabled { opacity: .45; cursor: default; }
+  select { font: inherit; max-width: 28ch; }
+  .conn { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+          padding: .4rem .6rem; border-bottom: 1px solid var(--jpy-line); font-size: 12px; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--jpy-muted); flex: none; }
+  .dot.ok { background: var(--wc-green, #2e7d32); }
+  .dot.bad { background: var(--jpy-out); }
+  .hint { color: var(--jpy-muted); }
+  .cells { padding: .5rem 0 2rem; }
+  .cell { display: grid; grid-template-columns: var(--jpy-gutter) 1fr; gap: 0 .5rem; padding: .18rem 0; }
+  .prompt { text-align: right; color: var(--jpy-in); font: 12px/1.6 var(--wc-mono, ui-monospace, monospace);
+            padding-top: .45rem; user-select: none; }
+  .prompt.out { color: var(--jpy-out); }
+  .src { grid-column: 2; background: var(--jpy-well); border: 1px solid var(--jpy-line);
+         border-radius: var(--wc-radius-sm, 4px); padding: .45rem .6rem; overflow-x: auto; }
+  .src pre, .out pre { margin: 0; font: 12px/1.45 var(--wc-mono, ui-monospace, monospace); white-space: pre; }
+  /* The editable buffer. data-no-persist is mandatory: form_state keys embed
+     the element's enumeration index, so inserting a cell would rehydrate one
+     cell's text into another. This pane owns the buffer and the service owns
+     the file; form_state must own neither. */
+  .src textarea { width: 100%; box-sizing: border-box; border: 0; padding: 0; margin: 0;
+    background: transparent; color: inherit; resize: none; overflow: hidden;
+    min-height: 1.45em;
+    font: 12px/1.45 var(--wc-mono, ui-monospace, monospace); }
+  .src textarea:focus { outline: none; }
+  .cell.dirty .src { border-color: var(--jpy-gold, #b26a00); }
+  .cell.dirty .prompt::before { content: '\u25CF'; color: var(--jpy-gold, #b26a00);
+    font-size: 9px; vertical-align: middle; margin-right: .2rem; }
+  /* A hairline gap between cells that becomes an insert affordance on hover —
+     the JupyterLab idiom, so nothing occupies space until it is wanted. */
+  .gap { grid-column: 1 / -1; height: .75rem; margin-bottom: .5rem; display: flex; align-items: center;
+         justify-content: center; gap: .3rem; opacity: 0; transition: opacity .12s; }
+  .gap:hover, .gap:focus-within { opacity: 1; }
+  .gap::before, .gap::after { content: ''; flex: 1; height: 1px; background: var(--jpy-line); }
+  .gap button { font-size: 10px; padding: 0 .45rem; line-height: 1.4; }
+  .cellbar .danger { color: var(--jpy-out); border-color: color-mix(in srgb, var(--jpy-out) 35%, var(--jpy-line)); }
+  .save-state { font-size: 11px; }
+  .save-state.dirty { color: var(--jpy-gold, #b26a00); }
+  .save-state.saved { color: var(--jpy-green, #2e7d32); }
+  .save-state.bad   { color: var(--jpy-out); cursor: pointer; text-decoration: underline dotted; }
+  /* The chip is plain text until something has gone wrong, at which point it
+     becomes the retry affordance. That is why the Save button could go: several
+     of the service's refusal paths publish nothing, so without one
+     always-visible indicator a notebook that silently stopped saving would look
+     exactly like one that is saving fine. */
+  .choice { display: flex; gap: .35rem; align-items: center; flex-wrap: wrap;
+            padding: .4rem .6rem; border-bottom: 1px solid var(--jpy-line); font-size: 12px;
+            background: color-mix(in srgb, var(--jpy-out) 8%, transparent); }
+  .out { padding: .2rem .6rem; overflow-x: auto; }
+  /* The gutter label carries BOTH classes, and .out's shorthand would otherwise
+     clobber the alignment .prompt sets — Out[n] ends up 4px high and 10px left
+     of the In[n] above it. */
+  .prompt.out { padding: .45rem 0 0; }
+  .out pre { white-space: pre-wrap; word-break: break-word; }
+  .out.stderr { background: var(--jpy-err-bg); border-radius: var(--wc-radius-sm, 4px); }
+  .out table { border-collapse: collapse; font-size: 12px; margin: .2rem 0; }
+  .out th, .out td { border: 1px solid var(--jpy-line); padding: .18rem .5rem; text-align: right; }
+  .out th { background: var(--jpy-well); font-weight: 600; }
+  .out img, .out svg { max-width: 100%; height: auto; }
+  /* A figure gets a frame and its pixel dimensions. Without this a 1x1 image —
+     or any small one — is indistinguishable from a cell that produced nothing,
+     which is a support question rather than a rendering choice. */
+  .fig { display: inline-block; margin: .2rem 0; padding: .3rem;
+         border: 1px solid var(--jpy-line); border-radius: var(--wc-radius-sm, 4px);
+         background-image: linear-gradient(45deg, var(--jpy-well) 25%, transparent 25%),
+                           linear-gradient(-45deg, var(--jpy-well) 25%, transparent 25%),
+                           linear-gradient(45deg, transparent 75%, var(--jpy-well) 75%),
+                           linear-gradient(-45deg, transparent 75%, var(--jpy-well) 75%);
+         background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; }
+  .fig img.tiny { width: 64px; height: 64px; image-rendering: pixelated; }
+  .fig figcaption { font-size: 10px; color: var(--jpy-muted); text-align: center; padding-top: .2rem; }
+  /* The per-cell composer. data-no-persist is load-bearing: form_state keys
+     embed the element's enumeration index, so a composer that appears and
+     disappears would shift every later cell's key. These notes are transient. */
+  .composer { grid-column: 2; display: flex; gap: .35rem; align-items: flex-start; padding: .25rem 0; }
+  .composer textarea { flex: 1; min-height: 2.2rem; font: inherit; padding: .3rem .45rem;
+                       border: 1px solid var(--jpy-line); border-radius: var(--wc-radius-sm, 4px);
+                       background: var(--wc-panel-bg, #fff); color: inherit; resize: vertical; }
+  .md { grid-column: 2; padding: .1rem .6rem; }
+  .md h1 { font-size: 1.5em; } .md h2 { font-size: 1.25em; } .md h3 { font-size: 1.1em; }
+  .md h1, .md h2, .md h3, .md h4 { margin: .5em 0 .3em; line-height: 1.25; }
+  .md p { margin: .4em 0; } .md ul, .md ol { margin: .4em 0; padding-left: 1.4em; }
+  .md code, .inline-code { font: .92em var(--wc-mono, ui-monospace, monospace);
+    background: var(--jpy-well); padding: .08em .3em; border-radius: 3px; }
+  .cellbar { grid-column: 2; display: flex; gap: .3rem; opacity: 0; transition: opacity .12s; padding: .1rem 0; }
+  .cell:hover .cellbar, .cell:focus-within .cellbar { opacity: 1; }
+  .cellbar button { font-size: 11px; padding: .1rem .4rem; }
+  .badge { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+           color: var(--jpy-muted); border: 1px solid var(--jpy-line); border-radius: 3px;
+           padding: 0 .3rem; margin-left: .35rem; }
+  .note { color: var(--jpy-muted); font-size: 12px; padding: .5rem .6rem; }
+  .err { color: var(--jpy-out); }
+  .busy .prompt::after { content: "*"; }
+  /* ANSI SGR, mapped onto surface tokens rather than raw terminal colours. */
+  .a30,.a90{opacity:.6}.a31,.a91{color:var(--jpy-out)}.a32,.a92{color:var(--wc-green,#2e7d32)}
+  .a33,.a93{color:var(--wc-gold,#b26a00)}.a34,.a94{color:var(--jpy-in)}
+  .a35,.a95{color:var(--wc-accent-dark,#6a1b9a)}.a36,.a96{color:var(--wc-accent,#00838f)}
+  .ab{font-weight:700}.ai{font-style:italic}.au{text-decoration:underline}
+  @media (max-width: 560px) { :host, .nb { --jpy-gutter: 3.2rem; } .prompt { font-size: 10px; } }
+</style>
+
+<div class="nb" tabindex="-1">
+  <div class="bar">
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <button id="addtab" title="Open or create a notebook">+</button>
+    <button id="run-all" title="Run every code cell in this notebook">Run all</button>
+    <button id="interrupt" title="Interrupt the running cell">Interrupt</button>
+    <button id="restart" title="Restart the kernel">Restart</button>
+    <button id="undo" title="Undo the last cell change (Z when focus is outside a cell)">Undo</button>
+    <button id="redo" title="Redo (Shift+Z outside a cell)">Redo</button>
+    <button id="reload" title="Re-read the .ipynb files from disk">Reload</button>
+    <span class="save-state" id="save-state" role="status"></span>
+  </div>
+  <div class="picker" id="picker" hidden>
+    <div class="crumbs"><button id="pk-up">↑ up</button><code id="pk-dir"></code>
+      <button id="pk-close" style="margin-left:auto">Close</button></div>
+    <ul id="pk-list"></ul>
+    <div class="mk"><input id="pk-name" data-no-persist placeholder="New notebook name (optional)">
+      <button id="pk-new">Create here</button></div>
+    <div class="why" id="pk-why"></div>
+  </div>
+  <div class="choice" id="choice" hidden>
+    <span id="choice-text"></span>
+    <button id="choice-reload">Reload from disk</button>
+    <button id="choice-dismiss">Keep editing</button>
+  </div>
+  <div class="conn">
+    <span class="dot" id="dot"></span>
+    <span id="conn-text">starting…</span>
+    <select id="servers" hidden aria-label="Jupyter server"></select>
+    <button id="rescan">Rescan</button>
+    <span class="hint" id="conn-hint"></span>
+  </div>
+  <div class="cells" id="cells"></div>
+</div>
+
+<script>
+  // Every query goes through `root` — the pane's shadow root. document.* cannot
+  // see in here and would kill this script at mount.
+  const $ = (id) => root.getElementById(id);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  // A STRICTLY MONOTONIC stamp, not a bare Date.now(). The service refuses a
+  // control write whose seq is <= the last one it applied — that is what stops
+  // a persisted op replaying after graph navigation — and Date.now() has
+  // millisecond resolution, so two writes in the same tick (an edit flush
+  // followed by a save, or one edit per dirty cell) collide and every one
+  // after the first is silently dropped. Measured: 100% of saves.
+  // Keeping the wall-clock floor preserves the replay guard; the +1 guarantees
+  // ordering within a tick.
+  let ctlSeq = 0;
+  const nextSeq = () => (ctlSeq = Math.max(Date.now(), ctlSeq + 1));
+  const ctl = (op, extra) => store.set({ jpy_ctl: { seq: nextSeq(), op, ...(extra || {}) } });
+
+  let nb = null, conn = null, saveState = null, hist = null, lastNotice = null;
+  // The pane owns the live buffer; the service owns the file. `edits` survives
+  // a re-render, which matters because every jpy_out_* tick re-renders the list.
+  const edits = new Map();
+  const dirty = new Set();
+  const editTimers = new Map();
+  const markDirty = (id, on) => { if (on) dirty.add(id); else dirty.delete(id); paintSaveState(); };
+  const scheduleEdit = (id, source) => {
+    clearTimeout(editTimers.get(id));
+    editTimers.set(id, setTimeout(() => ctl("edit", { cell: id, source }), 600));
+  };
+  const flushEdit = (id) => {
+    clearTimeout(editTimers.get(id));
+    if (edits.has(id)) ctl("edit", { cell: id, source: edits.get(id) });
+  };
+  // Leaving the editor has to move the caret out of it. renderCells refuses to
+  // hide an editor that holds focus — that guard is what stops an autosave or an
+  // output tick yanking the box away mid-keystroke — and Done, Escape and
+  // Cmd+Enter are every one of them pressed with the caret still inside. Without
+  // the blur the guard would quietly make all three do nothing.
+  const leaveEdit = (n, id) => {
+    n.mdEdit = false;
+    flushEdit(id);
+    if (n.ta) n.ta.blur();
+    renderCells();
+  };
+  const outs = new Map();          // cellId -> the latest jpy_out_<id> value
+  const subscribed = new Set();
+  // store.subscribe returns its own unsubscriber (mount-runtime.js), so a cell
+  // that disappears can stop listening instead of leaking a closure that keeps
+  // rendering a cell which is no longer in the notebook.
+  const unsubs = new Map();
+  // Source now arrives on its own per-cell key rather than inside jpy_nb, so
+  // the service can stop republishing the whole notebook on every keystroke.
+  // srcOf() is the single place that answers 'what does the FILE say this cell
+  // holds' — the live buffer is always `edits`.
+  const srcs = new Map();
+  const srcOf = (id) => { const v = srcs.get(id); return v && typeof v.source === 'string' ? v.source : ''; };
+
+  // --- ANSI SGR -> spans ---------------------------------------------------
+  // Tracebacks arrive with escape codes intact (measured against a live kernel),
+  // and a traceback without its colour is markedly harder to read. This is the
+  // whole decoder: it understands SGR and ignores everything else.
+  const ESC = String.fromCharCode(27);
+  function ansi(text, into) {
+    const re = new RegExp(ESC + "\\[([0-9;]*)m", "g");
+    let last = 0, cls = [], m;
+    const emit = (s) => {
+      if (!s) return;
+      if (!cls.length) { into.appendChild(document.createTextNode(s)); return; }
+      into.appendChild(el("span", cls.join(" "), s));
+    };
+    while ((m = re.exec(text))) {
+      emit(text.slice(last, m.index));
+      last = m.index + m[0].length;
+      for (const raw of (m[1] || "0").split(";")) {
+        const n = parseInt(raw || "0", 10);
+        if (n === 0) cls = [];
+        else if (n === 1) cls.push("ab");
+        else if (n === 3) cls.push("ai");
+        else if (n === 4) cls.push("au");
+        else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) {
+          cls = cls.filter((c) => !/^a\d/.test(c)); cls.push("a" + n);
+        }
+      }
+    }
+    emit(text.slice(last));
+  }
+
+  // Schemes a notebook may link to. Anchored, so nothing prefixed can slip past;
+  // "//host" is excluded deliberately (it inherits the page scheme and reads as
+  // a path), and so are data:, blob: and javascript:.
+  const SAFE_HREF = /^(?:https?:\/\/|mailto:|#|\/(?!\/)|\.{1,2}\/)/i;
+
+  // --- markdown subset -----------------------------------------------------
+  // Built with createElement from the cell's own text. Deliberately small:
+  // headings, emphasis, inline code, fenced code, lists, links, rules.
+  function markdown(src, into) {
+    const lines = String(src).split("\n");
+    let i = 0, list = null;
+    const inline = (s, parent) => {
+      const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+      let last = 0, m;
+      while ((m = re.exec(s))) {
+        if (m.index > last) parent.appendChild(document.createTextNode(s.slice(last, m.index)));
+        const t = m[0];
+        if (t[0] === "`") parent.appendChild(el("code", "inline-code", t.slice(1, -1)));
+        else if (t.startsWith("**")) parent.appendChild(el("strong", null, t.slice(2, -2)));
+        else if (t[0] === "*") parent.appendChild(el("em", null, t.slice(1, -1)));
+        else {
+          const cut = t.indexOf("](");
+          const a = el("a", null, t.slice(1, cut));
+          // The URL is notebook text, i.e. untrusted: [x](javascript:...) would
+          // run in the pane, which holds the store. An ALLOWLIST rather than a
+          // javascript:-blocklist, because a blocklist loses to whitespace,
+          // control characters, entities and data:. The link text is always
+          // rendered — a suppressed link degrades to plain text, never silence.
+          const href = t.slice(cut + 2, -1).trim();
+          if (SAFE_HREF.test(href)) { a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; }
+          else a.title = "link suppressed (" + href.slice(0, 30) + ")";
+          parent.appendChild(a);
+        }
+        last = m.index + t.length;
+      }
+      if (last < s.length) parent.appendChild(document.createTextNode(s.slice(last)));
+    };
+    const endList = () => { if (list) { into.appendChild(list); list = null; } };
+    while (i < lines.length) {
+      const line = lines[i];
+      if (/^```/.test(line)) {
+        endList();
+        const buf = []; i++;
+        while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+        i++;
+        const pre = el("pre"); pre.appendChild(el("code", null, buf.join("\n")));
+        into.appendChild(pre); continue;
+      }
+      const h = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (h) { endList(); const n = el("h" + h[1].length); inline(h[2], n); into.appendChild(n); i++; continue; }
+      if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+        const ordered = /^\s*\d+\./.test(line);
+        if (!list || list.tagName.toLowerCase() !== (ordered ? "ol" : "ul")) { endList(); list = el(ordered ? "ol" : "ul"); }
+        const li = el("li"); inline(line.replace(/^\s*([-*+]|\d+\.)\s+/, ""), li); list.appendChild(li); i++; continue;
+      }
+      if (/^\s*(---|\*\*\*|___)\s*$/.test(line)) { endList(); into.appendChild(el("hr")); i++; continue; }
+      if (!line.trim()) { endList(); i++; continue; }
+      const buf = [];
+      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*([-*+]|\d+\.)\s)/.test(lines[i])) buf.push(lines[i++]);
+      endList();
+      const p = el("p"); inline(buf.join(" "), p); into.appendChild(p);
+    }
+    endList();
+  }
+
+  // --- outputs -------------------------------------------------------------
+  function renderOutput(o, into) {
+    if (o.kind === "stream") {
+      const box = el("div", "out" + (o.name === "stderr" ? " stderr" : ""));
+      const pre = el("pre"); ansi(o.text, pre); box.appendChild(pre);
+      if (o.clipped) box.appendChild(el("div", "note", "output clipped at " + o.text.length + " of " + o.clipped + " characters"));
+      into.appendChild(box); return;
+    }
+    if (o.kind === "error") {
+      const box = el("div", "out stderr");
+      const pre = el("pre"); ansi(o.traceback || (o.ename + ": " + o.evalue), pre); box.appendChild(pre);
+      into.appendChild(box); return;
+    }
+    const box = el("div", "out");
+    if (o.kind === "html") {
+      // The ONE innerHTML in this pane, and it is safe by construction: the
+      // service rebuilt this markup from an allowlist of tags with every
+      // attribute dropped, so nothing the notebook authored survives except
+      // text and structure. Raw cell HTML never reaches here.
+      const holder = el("div"); holder.innerHTML = o.html; box.appendChild(holder);
+    } else if (o.kind === "svg") {
+      const holder = el("div"); holder.innerHTML = o.svg; box.appendChild(holder);
+    } else if (o.kind === "image") {
+      const fig = el("figure", "fig");
+      const img = el("img");
+      const cap = el("figcaption", null, "");
+      img.alt = "cell output image"; img.loading = "lazy";
+      img.onload = () => {
+        const w = img.naturalWidth, h = img.naturalHeight;
+        if (w <= 16 || h <= 16) { img.classList.add("tiny"); cap.textContent = w + "x" + h + " px — enlarged"; }
+        else cap.textContent = w + "x" + h + " px";
+      };
+      img.onerror = () => { cap.textContent = "image could not be decoded (" + o.mime + ")"; };
+      img.src = "data:" + o.mime + ";base64," + o.b64;
+      fig.append(img, cap);
+      box.appendChild(fig);
+    } else if (o.kind === "markdown") { const m = el("div", "md"); markdown(o.text, m); box.appendChild(m); }
+    else if (o.kind === "json" || o.kind === "text") { const pre = el("pre"); ansi(o.text, pre); box.appendChild(pre); }
+    else if (o.kind === "too-big") {
+      box.appendChild(el("div", "note", "output withheld — " + o.mime + ", " + Math.round(o.bytes / 1024) + " KB. Large outputs are capped so they do not ride into every committed graph node."));
+    } else if (o.kind === "capped") {
+      box.appendChild(el("div", "note", o.withheld + " further output(s) withheld — this cell exceeded " + Math.round(o.limit / 1024) + " KB."));
+    }
+    if (o.inert && o.inert.length) {
+      box.appendChild(el("span", "badge", o.inert.join(", ") + " not executed"));
+    }
+    into.appendChild(box);
+  }
+
+  // --- cells ---------------------------------------------------------------
+  // INCREMENTAL, and that is the whole point. The previous version opened with
+  // host.replaceChildren() and built a fresh <textarea> per cell — on every
+  // jpy_nb push AND every jpy_out_<id> tick, i.e. seconds apart while someone is
+  // typing. Restoring the caret afterwards is possible; restoring an UNDO
+  // HISTORY on a replaced element is not, so native Cmd+Z was being destroyed
+  // several times a second. Reconciling instead of replacing gives real
+  // per-cell, browser-managed undo for no JS and no store bytes.
+  const nodes = new Map();   // cellId -> { wrap, ta, pre, prompt, outWrap, outCol, outSeq }
+
+  function buildCell(c, tab) {
+    const wrap = el("div", "cell");
+    const prompt = el("div", "prompt", "");
+    wrap.appendChild(prompt);
+    const n = { wrap, prompt, ta: null, pre: null, outSeq: null };
+
+    // BOTH containers, always, switched with `hidden`. Building only one meant a
+    // cell that changed type kept the wrong container forever, and a markdown
+    // cell had no editor at all.
+    const isCode = !(c.type === "markdown" || c.type === "raw");
+    {
+      const md = el("div", "md");
+      md.ondblclick = () => { if ((cellNow(c.id) || c).type !== "code") { n.mdEdit = true; renderCells(); if (n.ta) n.ta.focus(); } };
+      wrap.appendChild(md);
+      n.md = md;
+    }
+    {
+      {
+      const src = el("div", "src");
+      if (c.truncated) {
+        n.pre = el("pre", null, srcOf(c.id));
+        src.appendChild(n.pre);
+        src.appendChild(el("div", "note", "source truncated — not editable, and this notebook cannot be saved while it is, because writing it back would erase the rest of this cell"));
+      } else {
+        const ta = document.createElement("textarea");
+        ta.setAttribute("data-no-persist", "");
+        ta.spellcheck = !isCode;
+        if (!isCode) ta.placeholder = "Markdown — # heading, **bold**, `code`";
+        ta.dataset.cell = c.id;
+        ta.value = edits.has(c.id) ? edits.get(c.id) : srcOf(c.id);
+        // Measuring inside display:none yields 0, and 0px with overflow:hidden
+        // is an invisible box holding the right text. A markdown cell is BUILT
+        // with its editor hidden, so the first grow() always measured 0 —
+        // clicking Edit then revealed a zero-height textarea. Never write a
+        // height we could not measure; "" hands it back to CSS min-height.
+        const grow = () => {
+          ta.style.height = "auto";
+          const h = ta.scrollHeight;
+          ta.style.height = h ? h + "px" : "";
+        };
+        n.grow = grow;
+        ta.oninput = () => {
+          edits.set(c.id, ta.value);
+          grow();
+          markDirty(c.id, ta.value !== (n.baseline != null ? n.baseline : srcOf(c.id)));
+          scheduleEdit(c.id, ta.value);
+        };
+        ta.onblur = () => flushEdit(c.id);
+        ta.onkeydown = (e) => {
+          // c is the cell object from the render that BUILT this node, and a
+          // node outlives its type — so branch on the live one, or ⌘Enter keeps
+          // doing whatever this cell used to be.
+          const liveType = (cellNow(c.id) || c).type;
+          if (e.key === "Escape" && n.mdEdit) { e.preventDefault(); leaveEdit(n, c.id); }
+          else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && liveType !== "code") { e.preventDefault(); leaveEdit(n, c.id); }
+          else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); flushEdit(c.id); ctl("run", { cell: c.id, source: ta.value }); }
+          else if ((e.key === "s" || e.key === "S") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); flushEdit(c.id); ctl("save", {}); }
+          else if (e.key === "Tab") {
+            e.preventDefault();
+            // setRangeText keeps this inside the browser's own undo stack, so a
+            // Tab is undoable with everything else rather than being a hole in
+            // the history.
+            const a = ta.selectionStart;
+            ta.setRangeText("    ", a, ta.selectionEnd, "end");
+            ta.oninput();
+          }
+        };
+        n.ta = ta;
+        src.appendChild(ta);
+        requestAnimationFrame(grow);
+      }
+      n.srcBox = src;
+      wrap.appendChild(src);
+      }
+
+      const bar = el("div", "cellbar");
+      const run = el("button", null, "Run");
+      run.title = "Run this cell. Claude is not told.";
+      run.onclick = () => { flushEdit(c.id); ctl("run", { cell: c.id, source: n.ta ? n.ta.value : srcOf(c.id) }); };
+      const runTell = el("button", null, "Run + tell Claude");
+      runTell.title = "Run this cell and send it to the queue rail with a note";
+      runTell.onclick = () => composer(wrap, c, tab, true);
+      const ask = el("button", null, "Ask Claude");
+      ask.title = "Send this cell to the queue rail with a note, without running it";
+      ask.onclick = () => composer(wrap, c, tab, false);
+      // Structural controls. They write the same jpy_ctl control key, so they
+      // never reach the queue rail, and the service refuses any of them below
+      // its start-time floor so graph navigation cannot resurrect a delete.
+      const up = el("button", null, "\u2191");
+      up.title = "Move this cell up";
+      up.onclick = () => { const i = cellIndex(c.id); if (i > 0) ctl("move", { cell: c.id, to: i - 1 }); };
+      const down = el("button", null, "\u2193");
+      down.title = "Move this cell down";
+      down.onclick = () => { const i = cellIndex(c.id); if (i >= 0) ctl("move", { cell: c.id, to: i + 1 }); };
+      const asType = el("button", null, "");
+      const del = el("button", "danger", "Delete");
+      del.title = "Delete this cell";
+      del.onclick = () => {
+        // No modal — a modal would block the whole extension host. The undo is
+        // that the change is not on disk until the next save, and Reload gets
+        // the file back verbatim.
+        flushEdit(c.id);
+        ctl("delete", { cell: c.id });
+      };
+      // Run only makes sense for a code cell; everything else applies to all of
+      // them, which is what makes a type change reversible.
+      // Per-cell undo. Dedicated because the keyboard path depends on focus,
+      // modifiers and a browser undo stack that is per-frame rather than
+      // per-textarea; a button depends on none of those.
+      const cundo = el("button", null, "\u21B6");
+      cundo.onclick = () => cellHistory(c.id, -1);
+      n.cundo = cundo;
+      const credo = el("button", null, "\u21B7");
+      credo.onclick = () => cellHistory(c.id, 1);
+      n.credo = credo;
+      const mdEdit = el("button", null, "Edit");
+      mdEdit.onclick = () => {
+        if (n.mdEdit) { leaveEdit(n, c.id); return; }
+        n.mdEdit = true; renderCells(); if (n.ta) n.ta.focus();
+      };
+      n.mdToggle = mdEdit;
+      // Every type-dependent button is appended ALWAYS and toggled per render.
+      // Appending by the type the cell happened to have at build time is how
+      // "To md" froze its label, and it is why a converted cell used to lose its
+      // Edit button and keep offering Run.
+      bar.append(run, runTell, cundo, credo, mdEdit, ask, up, down, asType, del);
+      n.run = run; n.runTell = runTell;
+      n.asType = asType;
+      wrap.appendChild(bar);
+    }
+
+    // The insert affordance that follows this cell.
+    const gap = el("div", "gap");
+    const addCode = el("button", null, "+ code");
+    addCode.onclick = () => ctl("insert", { cell: c.id, where: "after", type: "code" });
+    const addMd = el("button", null, "+ markdown");
+    addMd.onclick = () => ctl("insert", { cell: c.id, where: "after", type: "markdown" });
+    gap.append(addCode, addMd);
+    n.gap = gap;
+
+    // A stable output row per cell, hidden when empty. Keeping the node rather
+    // than creating and destroying it is what lets the cell above it keep focus.
+    const outWrap = el("div", "cell");
+    outWrap.hidden = true;
+    const outPrompt = el("div", "prompt out", "");
+    const outCol = el("div");
+    outWrap.append(outPrompt, outCol);
+    n.outWrap = outWrap; n.outPrompt = outPrompt; n.outCol = outCol;
+    return n;
+  }
+
+  // The notebook's own language, shortened for a button face: a Python
+  // notebook toggles "To md" / "To py" rather than the generic "To code", so
+  // the round trip is obvious and reversible.
+  const SHORT_LANG = { python: "py", julia: "jl", javascript: "js", typescript: "ts", r: "R" };
+  const langLabel = () => {
+    const tab = nb && (nb.tabs || []).find((t) => t.id === nb.active);
+    const lang = String((tab && tab.lang) || "python").toLowerCase();
+    return SHORT_LANG[lang] || lang.slice(0, 4) || "code";
+  };
+
+  // The cell as the CURRENT notebook describes it. Every handler built inside
+  // buildCell closes over the cell object of the render that created the node,
+  // which is a snapshot: type changes, and the node stays.
+  const cellNow = (id) => {
+    const tab = nb && (nb.tabs || []).find((t) => t.id === nb.active);
+    return tab ? (tab.cells || []).find((c) => c.id === id) : null;
+  };
+
+  const cellIndex = (id) => {
+    const tab = nb && (nb.tabs || []).find((t) => t.id === nb.active);
+    return tab ? (tab.cells || []).findIndex((c) => c.id === id) : -1;
+  };
+
+  function renderCells() {
+    const host = $("cells");
+    const tab = nb && (nb.tabs || []).find((t) => t.id === nb.active);
+
+    if (!tab || tab.error) {
+      for (const n of nodes.values()) { n.wrap.remove(); n.outWrap.remove(); if (n.gap) n.gap.remove(); }
+      nodes.clear();
+      if (tab && tab.error && tab.error !== "no-notebooks") {
+        host.replaceChildren(el("div", "note err", tab.error + " — " + (tab.detail || "")));
+        return;
+      }
+      // Reachable now that tabs can be closed, so it offers the way forward
+      // rather than just saying nothing is loaded.
+      const box = el("div", "empty");
+      box.appendChild(el("div", null, "No notebook open."));
+      const openB = el("button", null, "Open a notebook");
+      openB.onclick = () => openPicker();
+      const newB = el("button", null, "New notebook");
+      newB.onclick = () => openPicker();
+      const row = el("div"); row.style.marginTop = ".6rem"; row.append(openB, newB);
+      box.appendChild(row);
+      if (tab && tab.detail) box.appendChild(el("div", "note", tab.detail));
+      host.replaceChildren(box);
+      return;
+    }
+    // Drop the placeholder note, if one is showing.
+    if (host.firstChild && host.firstChild.classList && host.firstChild.classList.contains("note")) host.replaceChildren();
+
+    const seen = new Set();
+    let slot = 0;
+    for (const c of tab.cells || []) {
+      seen.add(c.id);
+      let n = nodes.get(c.id);
+      if (!n) { n = buildCell(c, tab); nodes.set(c.id, n); }
+
+      const out = outs.get(c.id);
+      const busy = !!(out && out.state === "busy");
+      const count = out && out.exec_count != null ? out.exec_count : c.exec_count;
+
+      n.wrap.className = "cell" + (busy ? " busy" : "") + (dirty.has(c.id) ? " dirty" : "");
+      n.prompt.textContent = (c.type === "markdown" || c.type === "raw")
+        ? "" : "In [" + (busy ? "*" : (count == null ? " " : count)) + "]:";
+
+      // Which container is on screen. For a markdown cell the rule is: show the
+      // EDITOR whenever the cell is empty, or the user asked to edit it. Keying
+      // on emptiness rather than a new-cell flag is idempotent, survives remount
+      // and graph navigation, and collapses "just inserted" and "emptied and
+      // clicked away" into one case that can never be invisible.
+      const codeCell = c.type === "code";
+      const body = edits.has(c.id) ? edits.get(c.id) : srcOf(c.id);
+      // The empty-cell rule is a LATCH, not a steady state. A markdown cell that
+      // opened as an editor because it was empty stops being empty the instant
+      // anyone types in it — and the first autosave forces a render, because the
+      // service republishes jpy_src_ when it writes the file. Recomputing from
+      // emptiness there swapped the preview in underneath the caret. Committing
+      // to mdEdit on the way IN makes editing a state the user leaves, via
+      // Done / Escape / Cmd+Enter, rather than one the file contents revoke.
+      // A node outlives its type, so the latch has to be released when the cell
+      // stops being markdown — otherwise "To py" then "To md" comes back as a
+      // raw editor instead of rendering, because the latch from the last edit
+      // was still set underneath.
+      // ...and it may only fire on a cell we KNOW is empty. pushNb() and
+      // pushSrc() are two separate store writes, so a markdown cell is on screen
+      // for one render before its source arrives. Latching that transient made
+      // it permanent: every markdown cell opened as a raw editor. `editing`
+      // below still shows the editor meanwhile — that part self-corrects.
+      const known = edits.has(c.id) || srcs.has(c.id);
+      if (codeCell) n.mdEdit = false;
+      else if (!n.mdEdit && known && !String(body || "").trim()) n.mdEdit = true;
+      // Belt and braces for every other path: never take the editor away from a
+      // caret that is inside it.
+      const editing = codeCell || n.mdEdit || (n.ta && root.activeElement === n.ta) || !String(body || "").trim();
+      const revealed = !!(n.srcBox && n.srcBox.hidden && editing);
+      if (n.srcBox) n.srcBox.hidden = !editing;
+      if (n.md) n.md.hidden = editing;
+      if (n.run) n.run.hidden = !codeCell;
+      if (n.runTell) n.runTell.hidden = !codeCell;
+      if (n.mdToggle) {
+        n.mdToggle.hidden = codeCell;
+        n.mdToggle.textContent = n.mdEdit ? "Done" : "Edit";
+        n.mdToggle.title = n.mdEdit ? "Render this markdown" : "Edit this markdown";
+      }
+      if (n.md && !editing) { n.md.replaceChildren(); markdown(body, n.md); }
+      else if (n.md && editing) n.md.replaceChildren();
+
+      // The per-cell undo button is live only when the service says this cell
+      // has a prior value — jpy_hist.cells is a sparse map maintained by diffing
+      // sealed snapshots, so no journal re-read is needed to answer it.
+      if (n.cundo) {
+        const live = !!(hist && hist.cells && hist.cells[c.id]) || dirty.has(c.id);
+        n.cundo.disabled = !live;
+        n.cundo.title = live ? "Undo the last change to this cell (Cmd/Ctrl+Z in the cell)" : "Nothing to undo in this cell";
+      }
+      if (n.credo) {
+        const fwd = !!(hist && hist.cells_redo && hist.cells_redo[c.id]);
+        n.credo.disabled = !fwd;
+        n.credo.title = fwd ? "Redo in this cell (Cmd/Ctrl+Shift+Z in the cell)" : "Nothing to redo in this cell";
+      }
+
+      // The type toggle is rebound on EVERY render rather than at build time.
+      // With incremental rendering a cell node outlives its type change, so a
+      // build-time label froze at "To md" and the trip was one-way.
+      if (n.asType) {
+        const toMd = c.type === "code";
+        n.asType.textContent = toMd ? "To md" : "To " + langLabel();
+        n.asType.title = toMd ? "Turn this into a markdown cell" : "Turn this back into a code cell";
+        n.asType.onclick = () => ctl("set-type", { cell: c.id, type: toMd ? "markdown" : "code" });
+      }
+
+      // NEVER touch a textarea the user is in, and never assign a value that is
+      // already correct — either would discard its undo history.
+      // The baseline is the last text the SERVICE told us the file holds. Dirty
+      // is measured against it, not against whatever jpy_nb last said, so this
+      // keeps working now that the service publishes source only on file change.
+      // the service stops echoing source on every keystroke.
+      if (n.baseline == null || (!edits.has(c.id) && srcOf(c.id) !== n.baseline)) n.baseline = srcOf(c.id);
+      if (n.ta && root.activeElement !== n.ta) {
+        const want = edits.has(c.id) ? edits.get(c.id) : srcOf(c.id);
+        if (n.ta.value !== want) { n.ta.value = want; if (n.grow) n.grow(); }
+      }
+      // The editor just left display:none, where it measured 0. Its value is
+      // already correct, so the assignment above did NOT re-grow it — this is
+      // the only place that can give a revealed markdown editor its height.
+      if (revealed && n.grow) n.grow();
+      if (n.pre && n.pre.textContent !== srcOf(c.id)) n.pre.textContent = srcOf(c.id);
+
+      // Outputs rebuild only when they actually changed.
+      const oseq = out ? out.seq : null;
+      if (oseq !== n.outSeq) {
+        n.outSeq = oseq;
+        if (out && out.outputs && out.outputs.length) {
+          n.outCol.replaceChildren();
+          for (const o of out.outputs) renderOutput(o, n.outCol);
+          if (out.state === "saved") n.outCol.appendChild(el("span", "badge", "from file — not run in this session"));
+          n.outPrompt.textContent = out.state === "saved" ? "Out[" + (count == null ? " " : count) + "]:" : "";
+          n.outWrap.hidden = false;
+        } else {
+          n.outCol.replaceChildren();
+          n.outWrap.hidden = true;
+        }
+      }
+
+      // Place both rows without moving anything already in the right slot —
+      // re-inserting a node that contains the focused textarea can blur it.
+      if (host.children[slot] !== n.wrap) host.insertBefore(n.wrap, host.children[slot] || null);
+      slot++;
+      if (host.children[slot] !== n.outWrap) host.insertBefore(n.outWrap, host.children[slot] || null);
+      slot++;
+      if (host.children[slot] !== n.gap) host.insertBefore(n.gap, host.children[slot] || null);
+      slot++;
+    }
+
+    // Cells that are gone: drop their DOM and stop listening for their outputs.
+    for (const [id, n] of [...nodes]) {
+      if (seen.has(id)) continue;
+      n.wrap.remove(); n.outWrap.remove(); if (n.gap) n.gap.remove();
+      nodes.delete(id);
+      const un = unsubs.get(id);
+      if (un) { try { un(); } catch {} unsubs.delete(id); }
+      subscribed.delete(id);
+      outs.delete(id);
+      srcs.delete(id);
+    }
+    while (host.children.length > slot) host.lastChild.remove();
+  }
+
+  // An inline note box. Opens under the cell, sends once, and removes itself —
+  // so the default view stays a notebook rather than a form.
+  function composer(afterEl, c, tab, alsoRun) {
+    const existing = root.querySelector(".composer");
+    if (existing) existing.remove();
+    const box = el("div", "composer");
+    const ta = document.createElement("textarea");
+    ta.placeholder = alsoRun ? "What should Claude look for when this finishes? (optional)" : "What do you want to ask about this cell? (optional)";
+    ta.setAttribute("data-no-persist", "");
+    ta.rows = 2;
+    const send = el("button", null, alsoRun ? "Run + send" : "Send");
+    const cancel = el("button", null, "Cancel");
+    const fire = () => {
+      const note = ta.value.trim();
+      if (alsoRun) ctl("run", { cell: c.id });
+      store.set({
+        jpy_ask: {
+          seq: nextSeq(),
+          notebook: tab.path,
+          cell: c.id,
+          kind: alsoRun ? "run-and-report" : ((outs.get(c.id) || {}).state === "error" ? "traceback" : "cell"),
+          note: note || null,
+        },
+      });
+      box.remove();
+    };
+    send.onclick = fire;
+    cancel.onclick = () => box.remove();
+    // Cmd/Ctrl+Enter sends; Escape closes. Plain Enter stays a newline.
+    ta.onkeydown = (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); fire(); }
+      else if (e.key === "Escape") { e.preventDefault(); box.remove(); }
+    };
+    box.append(ta, send, cancel);
+    afterEl.appendChild(box);
+    ta.focus();
+  }
+
+  function renderTabs() {
+    const host = $("tabs");
+    host.replaceChildren();
+    for (const t of (nb && nb.tabs) || []) {
+      const b = el("button", "tab" + (t.error ? " bad" : ""), t.name);
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", String(t.id === nb.active));
+      b.title = t.path || t.name;
+      b.onclick = () => { for (const id of dirty) flushEdit(id); ctl("set-tab", { id: t.id }); };
+      // Closing is safe without a confirm: autosave means a closed tab has
+      // already been written, and the service flushes once more before removing
+      // it. It refuses outright when a dirty tab has nowhere to save.
+      const x = el("span", "x", "\u00D7");
+      x.title = "Close this notebook";
+      x.onclick = (e) => { e.stopPropagation(); ctl("close", { id: t.id }); };
+      b.appendChild(x);
+      host.appendChild(b);
+    }
+  }
+
+  function renderConn() {
+    const dot = $("dot"), text = $("conn-text"), hint = $("conn-hint"), sel = $("servers");
+    const c = conn || {};
+    dot.className = "dot" + (c.ok ? " ok" : c.state === "error" || c.state === "no-server" ? " bad" : "");
+    text.textContent = c.ok
+      ? "kernel ready" + (c.server ? " — " + c.server.url : "")
+      : (c.state || "starting…") + (c.error ? ": " + c.error : "");
+    hint.textContent = c.hint || "";
+    const servers = c.servers || [];
+    sel.hidden = servers.length < 2;
+    // Keyed on the URLS, not the count. A rescan that finds the same NUMBER of
+    // servers after one died and another started left the old list on screen —
+    // and the list's values are indexes into the new one, so picking a row
+    // connected to whichever server now holds that position.
+    const sig = servers.map((x) => x.index + "\u0000" + x.url).join("\u0001");
+    if (!sel.hidden && sel.dataset.sig !== sig) {
+      sel.dataset.sig = sig;
+      sel.replaceChildren();
+      servers.forEach((s) => { const o = el("option", null, s.url + (s.root ? "  (" + s.root + ")" : "")); o.value = String(s.index); sel.appendChild(o); });
+      sel.onchange = () => ctl("connect", { index: Number(sel.value) });
+    }
+    for (const id of ["run-all", "interrupt", "restart"]) $(id).disabled = !c.ok;
+  }
+
+  // --- wiring --------------------------------------------------------------
+  $("run-all").onclick = () => ctl("run-all");
+  $("interrupt").onclick = () => ctl("interrupt");
+  $("restart").onclick = () => ctl("restart");
+  $("reload").onclick = () => ctl("reload");
+  $("rescan").onclick = () => ctl("discover");
+
+  let browseDir = null;
+  const openPicker = () => { $("picker").hidden = false; $("pk-why").textContent = ""; ctl("browse", {}); };
+  $("addtab").onclick = () => { $("picker").hidden ? openPicker() : ($("picker").hidden = true); };
+  $("pk-close").onclick = () => { $("picker").hidden = true; };
+  $("pk-up").onclick = () => { if (browseDir && browseDir.up) ctl("browse", { dir: browseDir.up }); };
+  $("pk-new").onclick = () => {
+    ctl("new", { dir: browseDir ? browseDir.dir : null, name: $("pk-name").value });
+    $("pk-name").value = "";
+  };
+
+  store.subscribe("jpy_browse", (v) => {
+    browseDir = v || null;
+    const list = $("pk-list");
+    list.replaceChildren();
+    $("pk-dir").textContent = (v && v.dir) || "";
+    $("pk-up").disabled = !(v && v.up);
+    for (const e of (v && v.entries) || []) {
+      const li = el("li", null, (e.dir ? "\uD83D\uDCC1 " : "\uD83D\uDCD3 ") + e.name);
+      li.onclick = () => {
+        if (e.dir) ctl("browse", { dir: e.path });
+        else { ctl("open", { path: e.path }); $("picker").hidden = true; }
+      };
+      list.appendChild(li);
+    }
+    if (!((v && v.entries) || []).length) list.appendChild(el("li", null, "(no notebooks or folders here)"));
+  });
+  // Undo/redo travel as "be at this version", not as a delta, so a duplicated
+  // click cannot over-rewind.
+  // Clearing the pane buffer is not optional. renderCells prefers edits.get(id)
+  // over the source the service restores, so an undo that really ran was being
+  // repainted with the pre-undo text — and with no server connected the save
+  // fails, edits is never cleared, and the screen never changes at all.
+  const sendHistory = (op) => {
+    for (const id of dirty) flushEdit(id);
+    edits.clear(); dirty.clear();
+    for (const n of nodes.values()) n.baseline = null;
+    ctl(op, {});
+  };
+  $("undo").onclick = () => sendHistory("undo");
+  $("redo").onclick = () => sendHistory("redo");
+  $("choice-reload").onclick = () => { edits.clear(); dirty.clear(); ctl("reload", {}); $("choice").hidden = true; };
+  $("choice-dismiss").onclick = () => { $("choice").hidden = true; };
+
+  // Z / Shift+Z drive DOCUMENT history, and only when focus is outside a cell —
+  // inside one, Cmd+Z is the browser's own text undo and must stay untouched.
+  // A keydown travels the composed path of the FOCUSED element, so a listener on
+  // the shadow root only fires when focus is already inside this pane. Nothing
+  // put it there — the mount host has no tabindex and nothing calls focus() — so
+  // the binding was live in exactly one state: right after clicking a pane
+  // button. That is the whole "sometimes it works" report.
+  root.addEventListener("mousedown", (e) => {
+    const tgt = (e.composedPath && e.composedPath()[0]) || e.target;
+    const tag = tgt && tgt.tagName;
+    if (tag === "BUTTON" || tag === "SELECT" || tag === "TEXTAREA" || tag === "INPUT" || tag === "A") return;
+    const host = $("cells") && $("cells").parentNode;
+    if (host && host.focus) { try { host.focus({ preventScroll: true }); } catch { host.focus(); } }
+  });
+
+  root.addEventListener("keydown", (e) => {
+    // A real modifier is REQUIRED. The old binding fired on a bare `z`, which in
+    // the one state where it was live (a focused pane button) rewound the whole
+    // document on a stray keystroke — and collided with the shell, which claims
+    // single letters in exactly that state.
+    if (!(e.metaKey || e.ctrlKey)) return;
+    // Match the PHYSICAL key: e.key follows the layout's character, so a plain
+    // e.key check misses entirely on non-Latin layouts.
+    const isZ = e.code === "KeyZ" || /^z$/i.test(e.key);
+    const isY = e.code === "KeyY" || /^y$/i.test(e.key);
+    if (!isZ && !isY) return;
+    e.preventDefault();
+    const redo = isY || e.shiftKey;
+    const ta = root.activeElement;
+    if (ta && ta.tagName === "TEXTAREA" && ta.dataset && ta.dataset.cell) {
+      // Handled here rather than deferred to the browser: Chrome's undo stack is
+      // per-FRAME, not per-textarea, so the native chord can undo an edit in a
+      // different cell — or in the surface's own fields. Routing it to the
+      // per-cell op makes the key and the button do exactly one thing.
+      cellHistory(ta.dataset.cell, redo ? 1 : -1);
+      return;
+    }
+    sendHistory(redo ? "redo" : "undo");
+  });
+
+  // The one transport for per-cell history, shared by the button and the key.
+  function cellHistory(cellId, dir) {
+    const n = nodes.get(cellId);
+    const live = n && n.ta ? n.ta.value : (edits.has(cellId) ? edits.get(cellId) : srcOf(cellId));
+    edits.delete(cellId); dirty.delete(cellId);
+    if (n) n.baseline = null;
+    ctl("cell-undo", { cell: cellId, dir, source: live });
+  }
+
+  function paintSaveState() {
+    const n = $("save-state");
+    const tab = nb && (nb.tabs || []).find((t) => t.id === nb.active);
+    const st = saveState || {};
+    n.onclick = null;
+    const bad = (text, title, onclick) => {
+      n.className = "save-state bad"; n.textContent = "\u26A0 " + text; n.title = title || "";
+      if (onclick) n.onclick = onclick;
+    };
+    if (tab && tab.saveable === false) { bad("not saving", tab.save_hint || "", null); return; }
+    if (st.state === "saving") { n.className = "save-state"; n.textContent = "saving\u2026"; n.title = ""; return; }
+    if (st.state === "stale") {
+      bad("changed on disk — choose", st.error || "", () => {
+        $("choice-text").textContent = "This notebook changed on disk since it was opened. Your edits are still here and still in the undo history.";
+        $("choice").hidden = false;
+      });
+      return;
+    }
+    if (st.state === "unsaveable") { bad("not saving", st.error || "", null); return; }
+    if (st.state === "error") { bad("save failed — retry", st.error || "", () => ctl("save", {})); return; }
+    if (dirty.size) { n.className = "save-state dirty"; n.textContent = dirty.size + " unsaved"; n.title = "saves shortly after you stop typing"; return; }
+    if (st.state === "saved") { n.className = "save-state saved"; n.textContent = "saved " + new Date(st.at || Date.now()).toLocaleTimeString(); n.title = ""; return; }
+    n.className = "save-state"; n.textContent = ""; n.title = "";
+  }
+
+  function paintHist(h) {
+    const u = $("undo"), r = $("redo");
+    u.disabled = !(h && h.can_undo);
+    r.disabled = !(h && h.can_redo);
+    u.title = h && h.can_undo ? ("Undo " + (h.undo_label || "the last change")) : "Nothing to undo";
+    r.title = h && h.can_redo ? ("Redo " + (h.redo_label || "the next change")) : "Nothing to redo";
+  }
+
+  store.subscribe("jpy_hist", (h) => { hist = h || null; paintHist(h); renderCells(); });
+  store.subscribe("jpy_save", (v) => {
+    saveState = v || null;
+    if (v && v.state === "saved") {
+      // What is on disk is now what is on screen. Adopt the live buffer as the
+      // authoritative source as well as the baseline — dropping `edits` while
+      // srcs still held the load-time text is exactly what made a cell revert
+      // to its original contents after a run. The service republishes the same
+      // values a moment later; this just removes the race.
+      for (const [id, n] of nodes) {
+        if (!n.ta) continue;
+        n.baseline = n.ta.value;
+        const prev = srcs.get(id) || {};
+        srcs.set(id, { source: n.ta.value, truncated: !!prev.truncated });
+      }
+      edits.clear(); dirty.clear();
+    }
+    paintSaveState();
+  });
+
+  store.subscribe("jpy_conn", (v) => { conn = v || null; renderConn(); });
+  const REASONS = {
+    "outside-boundary": "That path is outside this pane's open_root, so the service will not read it.",
+    "outside-server-root": "That folder is outside the connected Jupyter server's root.",
+    "not-a-notebook": "That is not a .ipynb file.",
+    "tab-cap": "Too many notebooks open — close one first.",
+    "no-server": "Connect to a Jupyter server first.",
+    "exists": "A notebook with that name already exists here.",
+    "dirty-unsaveable": "That tab has unsaved edits and nowhere to save them. Fix the connection first.",
+    "open-disabled": "Opening notebooks at runtime is disabled for this pane (open_root: false).",
+  };
+  let lastActive = null;
+  store.subscribe("jpy_nb", (v) => {
+    nb = v || null;
+    // A cell id is unique only WITHIN a notebook. nbformat 4.0-4.4 carries no
+    // cell ids at all, so the service synthesises 'c' + index — and two such
+    // notebooks both start at c0. Every per-cell map in this pane is keyed by
+    // that bare id, so carrying them across a tab switch put one notebook's
+    // unsaved buffer into another notebook's cell, and the next save wrote it
+    // there. Drop them all on the switch; they re-seed from the store.
+    const active = nb && nb.active;
+    const firstPaint = lastActive === null;
+    const switched = active !== lastActive;
+    lastActive = active;
+    if (switched && !firstPaint) {
+      edits.clear(); dirty.clear(); outs.clear(); srcs.clear();
+      for (const n of nodes.values()) { n.wrap.remove(); n.outWrap.remove(); if (n.gap) n.gap.remove(); }
+      nodes.clear();
+      for (const un of unsubs.values()) { try { un(); } catch {} }
+      unsubs.clear(); subscribed.clear();
+    }
+    const nt = nb && nb.notice;
+    if (nt && nt.seq !== lastNotice) {
+      lastNotice = nt.seq;
+      $("pk-why").textContent = REASONS[nt.reason] || (nt.op + ": " + nt.reason);
+      if ($("picker").hidden && nt.reason !== "open-disabled") $("picker").hidden = false;
+    }
+    renderTabs(); renderConn();
+    // Subscribe to each cell's output key once. Per-cell keys are deliberate:
+    // store merges are a top-level Object.assign with no append primitive, so a
+    // single key would resend every cell's output on every streamed chunk.
+    for (const t of (nb && nb.tabs) || []) {
+      for (const c of t.cells || []) {
+        if (subscribed.has(c.id)) continue;
+        subscribed.add(c.id);
+        // null is a CLEAR, not "nothing to do" — the service publishes it when a
+        // type change drops outputs a markdown cell may not carry. Ignoring it
+        // left the dropped output on screen under a cell that no longer owns it.
+        const offOut = store.subscribe("jpy_out_" + c.id, (o) => { if (o) outs.set(c.id, o); else outs.delete(c.id); renderCells(); });
+        const offSrc = store.subscribe("jpy_src_" + c.id, (sv) => {
+          if (sv) srcs.set(c.id, sv); else srcs.delete(c.id);
+          renderCells();
+        });
+        // seed from whatever is already in the store — a remount arrives after
+        // the service has already published, so waiting for the next push would
+        // render every cell empty until something changed.
+        const seeded = (firstPaint || !switched) && store.get("jpy_src_" + c.id);
+        if (seeded) srcs.set(c.id, seeded);
+        const seededOut = store.get("jpy_out_" + c.id);
+        if (seededOut) outs.set(c.id, seededOut);
+        unsubs.set(c.id, () => { offOut(); offSrc(); });
+      }
+    }
+    // Paint AFTER subscribing and seeding. Source rides its own per-cell key,
+    // so painting first would show every cell empty until something changed.
+    renderCells();
+  });
+  renderConn();
+  paintHist(null);
+</script>
