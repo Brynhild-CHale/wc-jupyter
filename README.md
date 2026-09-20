@@ -144,6 +144,13 @@ Found by an audit of the kernel-protocol layer against the Jupyter messaging spe
 reproduced against a live kernel before being written down. The kernel-death hang that headed
 this list is fixed (see below); the rest are open, and here rather than quiet.
 
+- **Restarting the kernel *while a cell is running* can, rarely, leave the next run hung** at
+  `In [*]` with the pane still reporting connected. Restart clears it. Measured at roughly
+  1 in 5 under a synthetic hammer that restarts mid-run and dispatches again immediately,
+  down from "frequent" before the kernel-death work; `test/feasibility/09-restart-race.mjs`
+  reports the rate and records what each fix bought. The likely remaining gap is that the
+  post-restart readiness wait resolves on the first parentless `idle`, which can belong to
+  the outgoing kernel; pairing it with a `kernel_info` round trip is the next thing to try.
 - **A tab switch during Run All runs cells against the wrong notebook.** Queued cells are
   resolved against whichever tab is active when each one dequeues, not the tab the run started
   on.

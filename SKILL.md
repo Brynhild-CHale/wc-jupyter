@@ -349,6 +349,15 @@ and `renderCells` re-measures on the transition out of hidden. Without both halv
   `status{execution_state:'restarting'}` (an auto-restart after a crash — it belongs to no
   cell, so it must be read before the per-cell dispatch drops it), a socket close, a
   deliberate restart, and a watchdog for a kernel that vanishes silently.
+- **"Socket open" is not "kernel ready".** A restart is asynchronous on the server, so a
+  request sent after the socket opens but before the kernel is listening is accepted and never
+  answered — the cell hangs and the watchdog cannot help, because the kernel is not gone. The
+  restart path waits for the kernel's own parentless `status` announcement, holds any run the
+  user asks for while `settling`, and drains the queue afterwards. It also drops `conn.ok`
+  for the duration, so "connected" means something to anything waiting on it.
+- **The kernel watchdog needs TWO consecutive gone answers.** A restart makes the kernel id
+  404 for a moment, and a single 404 was enough to abort a perfectly healthy cell and put
+  "Press Restart" on a working pane.
 - **A deliberate restart needs the socket REBOUND.** It replaces the kernel process while
   the old socket stays open and `readyState 1`, bound to something gone — the next
   `execute_request` is accepted and never answered. An auto-restart does not need this; the

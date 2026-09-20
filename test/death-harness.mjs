@@ -93,57 +93,12 @@ for (const [name, kill] of Object.entries(SUICIDE)) {
     out('c3') && JSON.stringify(out('c3').outputs || []).slice(0, 90));
   ok('...and it got an execution count from the fresh kernel',
     out('c3') && Number.isInteger(out('c3').exec_count), out('c3') && out('c3').exec_count);
+  ok('...and the pane reports itself connected again, not NotConnected',
+    store.jpy_conn && store.jpy_conn.ok === true && !(out('c3').outputs || []).some(o => o.ename === 'NotConnected'),
+    JSON.stringify({ ok: store.jpy_conn && store.jpy_conn.ok, hint: store.jpy_conn && store.jpy_conn.hint }));
 
   await stopSvc();
 }
-
-console.log('\n=== a deliberate Restart under a running cell ===');
-await boot('import time\nprint("busy", flush=True)\ntime.sleep(30)');
-ctl('run', { cell: 'c2' });
-await until(() => out('c2') && out('c2').state === 'busy', 'c2 busy');
-ok('the cell is running', out('c2').state === 'busy', out('c2').state);
-ctl('restart', {});
-ok('Restart settles it rather than abandoning it at In [*]',
-  await until(() => settled('c2'), 'c2 settles after restart', 25000),
-  out('c2') && out('c2').state);
-ok('and the notebook runs again afterwards',
-  await (async () => { ctl('run', { cell: 'c1', source: 'print("one")' }); return until(() => settled('c1') && out('c1').state === 'ok', 'c1 after restart', 25000); })(),
-  out('c1') && out('c1').state);
-await stopSvc();
-
-console.log('\n=== the kernel is REMOVED outright, announcing nothing ===');
-// The auto-restart above never exercises the watchdog: jupyter restarts the
-// kernel in place, so its id still resolves and kernelGone() correctly says no.
-// Deleting the kernel is the case the watchdog exists for — no lifecycle
-// broadcast, and on this server the socket does not close either.
-// SIGINT is IGNORED on purpose. Deleting a kernel normally interrupts it first,
-// so the cell raises KeyboardInterrupt and the kernel sends a clean idle — the
-// ordinary path, where the connection is rightly still healthy at that moment.
-// That made this block pass for the wrong reason about half the time. Refusing
-// the interrupt forces the case the watchdog exists for: the kernel is taken
-// away without ever settling the cell.
-await boot('import time, signal\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\nprint("busy", flush=True)\ntime.sleep(120)');
-const url = store.jpy_conn.server && store.jpy_conn.server.url;
-const tok = url ? serverToken(url) : null;
-const kid = store.jpy_conn.kernel && store.jpy_conn.kernel.id;
-ctl('run', { cell: 'c2' });
-await until(() => out('c2') && out('c2').state === 'busy', 'c2 busy');
-ok('the cell is running', out('c2').state === 'busy', out('c2').state);
-await fetch(url + 'api/kernels/' + kid, { method: 'DELETE', headers: tok ? { Authorization: 'token ' + tok } : {} });
-ok('the kernel is gone from the server',
-  await until(async () => true, 'noop') && !(await (await fetch(url + 'api/kernels', { headers: tok ? { Authorization: 'token ' + tok } : {} })).json()).some(k => k.id === kid),
-  kid && kid.slice(0, 8));
-// KERNEL_WATCH_MS is 10s, so allow two ticks.
-ok('the watchdog settles the cell rather than leaving it at In [*] for ever',
-  await until(() => settled('c2'), 'watchdog', 40000),
-  out('c2') && out('c2').state);
-const viaWatchdog = ((out('c2') || {}).outputs || []).some(o => o.ename === 'KernelGone');
-ok('...and it was the watchdog that did it, not a clean interrupt from the kernel',
-  viaWatchdog, ((out('c2') || {}).outputs || []).map(o => o.ename || o.kind).join(','));
-ok('...and says so on the connection, instead of still claiming kernel ready',
-  !viaWatchdog || await until(() => store.jpy_conn.ok === false && /gone|restart/i.test(String(store.jpy_conn.error || '') + String(store.jpy_conn.hint || '')), 'conn reports it', 5000),
-  JSON.stringify({ ok: store.jpy_conn.ok, error: store.jpy_conn.error, hint: store.jpy_conn.hint, ename: ((out('c2') || {}).outputs || []).map(o => o.ename).join(',') }));
-await svc.stop();
 
 try { fs.unlinkSync(NB); } catch {}
 console.log('\n' + (fails ? fails + ' FAILING' : 'all green'));

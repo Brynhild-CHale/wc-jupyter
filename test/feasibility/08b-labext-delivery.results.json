@@ -1,0 +1,288 @@
+{
+  "meta": {
+    "disk": {
+      "prefix": "/Users/dev-hale/.cache/uv/builds-v0/.tmpPtDQaQ",
+      "labext_root": "/Users/dev-hale/.cache/uv/builds-v0/.tmpPtDQaQ/share/jupyter/labextensions",
+      "exists": true,
+      "files": [
+        {
+          "rel": "jupyterlab-plotly/static/0.03957c7088ad5ed0.js",
+          "bytes": 4843340
+        },
+        {
+          "rel": "jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js",
+          "bytes": 10804
+        },
+        {
+          "rel": "jupyterlab_pygments/static/747.67662283a5707eeb4d4c.js",
+          "bytes": 8351
+        },
+        {
+          "rel": "jupyterlab_pygments/package.json",
+          "bytes": 5919
+        },
+        {
+          "rel": "jupyterlab_pygments/static/remoteEntry.5cbb9d2323598fbda535.js",
+          "bytes": 3925
+        },
+        {
+          "rel": "jupyterlab_pygments/static/third-party-licenses.json",
+          "bytes": 2452
+        },
+        {
+          "rel": "jupyterlab-plotly/package.json",
+          "bytes": 1389
+        },
+        {
+          "rel": "jupyterlab-plotly/static/third-party-licenses.json",
+          "bytes": 1264
+        },
+        {
+          "rel": "jupyterlab_pygments/static/568.1e2faa2ba0bbe59c4780.js",
+          "bytes": 224
+        },
+        {
+          "rel": "jupyterlab_pygments/install.json",
+          "bytes": 199
+        }
+      ],
+      "total": 4878207,
+      "versions": {
+        "jupyterlab": "4.6.3",
+        "jupyter_server": "2.21.1",
+        "plotly": "7.1.0"
+      }
+    },
+    "lab_api_extensions": "[{\"name\": \"jupyterlab-pygments\", \"description\": \"Pygments theme using JupyterLab CSS variables\", \"homepage_url\": \"https://github.com/jupyterlab/jupyterlab_pygments\", \"pkg_type\": \"prebuilt\", \"allowed\": true, \"approved\": false, \"companion\": null, \"core\": false, \"enabled\": true, \"install\": {\"packageManager\": \"python\", \"packageName\": \"jupyterlab_pygments\", \"uninstallInstructions\": \"Use your Python package manager (pip, conda, etc.) to uninstall the package jupyterlab_pygments\"}, \"installed\": true, \"installed_version\": \"0.3.0\", \"latest_version\": \"0.3.0\", \"status\": \"ok\", \"author\": null, \"license\": null, \"bug_tracker_url\": null, \"documentation_url\": null, \"package_manager_url\": null, \"repository_url\": \"https://github.com/jupyterlab/jupyterlab_pygments.git\"}, {\"name\": \"jupyterlab-plotly\", \"description\": \"The plotly Jupyter extension\", \"homepage_url\": \"https://github.com/plotly/plotly.py\", \"pkg_type\": \"prebuilt\", \"allowed\": true, \"approved\": false, \"companion\": null, \"core\": false, \"enabled\": true, \"install\": {\"packageName\": \"plotly\", \"packageManager\": \"python\"}, \"installed\": true, \"installed_version\": \"7.1.0\", \"latest_version\": null, \"status\": \"ok\", \"author\": null, \"license\": null, \"bug_tracker_url\": null, \"documentation_url\": null, \"package_manager_url\": null, \"repository_url\": \"https://github.com/plotly/plotly.py\"}]",
+    "ms": 4908,
+    "fails": 0
+  },
+  "requests": [
+    {
+      "label": "with Authorization header",
+      "url": "http://127.0.0.1:8936/labextensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js",
+      "auth": "token header",
+      "status": 404,
+      "ms": 5,
+      "bytes": 3001,
+      "contentType": "text/html",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": null,
+      "head": "<!DOCTYPE HTML> <html> <head> <meta charset=\"utf-8\"> <title>Jupyter Server</tit"
+    },
+    {
+      "label": "with NO credentials at all",
+      "url": "http://127.0.0.1:8936/labextensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js",
+      "status": 404,
+      "ms": 1,
+      "bytes": 2957,
+      "contentType": "text/html",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": null,
+      "head": "<!DOCTYPE HTML> <html> <head> <meta charset=\"utf-8\"> <title>Jupyter Server</tit"
+    },
+    {
+      "label": "with ?token= query param",
+      "url": "http://127.0.0.1:8936/labextensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js?token=probeg68hx7z69f",
+      "status": 404,
+      "ms": 1,
+      "bytes": 3001,
+      "contentType": "text/html",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": null,
+      "head": "<!DOCTYPE HTML> <html> <head> <meta charset=\"utf-8\"> <title>Jupyter Server</tit"
+    },
+    {
+      "label": "a path that should 404",
+      "url": "http://127.0.0.1:8936/labextensions/does-not-exist/static/x.js",
+      "status": 404,
+      "ms": 0,
+      "bytes": 2957,
+      "contentType": "text/html",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": null,
+      "head": "<!DOCTYPE HTML> <html> <head> <meta charset=\"utf-8\"> <title>Jupyter Server</tit"
+    },
+    {
+      "label": "lab/api/extensions",
+      "url": "http://127.0.0.1:8936/lab/api/extensions",
+      "auth": "token header",
+      "status": 200,
+      "ms": 823,
+      "bytes": 1331,
+      "contentType": "application/json",
+      "nosniff": "nosniff",
+      "acao": "",
+      "cacheControl": null,
+      "head": "[{\"name\": \"jupyterlab-pygments\", \"description\": \"Pygments theme using JupyterLab CSS varia"
+    },
+    {
+      "label": "labextensions/jupyterlab-plotly/",
+      "url": "http://127.0.0.1:8936/labextensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js",
+      "status": 404,
+      "ms": 1,
+      "bytes": 2957,
+      "contentType": "text/html",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": null,
+      "head": "<!DOCTYPE HTML> <html> <head> <meta charset=\"utf-8\"> <title>Jupyter Server</tit"
+    },
+    {
+      "label": "lab/extensions/jupyterlab-plotly",
+      "url": "http://127.0.0.1:8936/lab/extensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js",
+      "status": 200,
+      "ms": 1,
+      "bytes": 10804,
+      "contentType": "application/javascript",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": "public, max-age=31536000, immutable",
+      "head": "var _JUPYTERLAB;(()=>{\"use strict\";var e,n,r,t,o,i,u,a,c,l,f,s,p,h,d,v,g,y,m,b,S,j,w,E,k,x"
+    },
+    {
+      "label": "static/labextensions/jupyterlab-",
+      "url": "http://127.0.0.1:8936/static/labextensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js",
+      "status": 404,
+      "ms": 0,
+      "bytes": 2957,
+      "contentType": "text/html",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": null,
+      "head": "<!DOCTYPE HTML> <html> <head> <meta charset=\"utf-8\"> <title>Jupyter Server</tit"
+    },
+    {
+      "label": "labextensions/jupyterlab-plotly/",
+      "url": "http://127.0.0.1:8936/labextensions/jupyterlab-plotly/package.json",
+      "status": 404,
+      "ms": 1,
+      "bytes": 2957,
+      "contentType": "text/html",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": null,
+      "head": "<!DOCTYPE HTML> <html> <head> <meta charset=\"utf-8\"> <title>Jupyter Server</tit"
+    },
+    {
+      "label": "working URL + ?token=",
+      "url": "http://127.0.0.1:8936/lab/extensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js?token=probeg68hx7z69f",
+      "status": 200,
+      "ms": 0,
+      "bytes": 10804,
+      "contentType": "application/javascript",
+      "nosniff": "nosniff",
+      "acao": "",
+      "cacheControl": "public, max-age=31536000, immutable",
+      "head": "var _JUPYTERLAB;(()=>{\"use strict\";var e,n,r,t,o,i,u,a,c,l,f,s,p,h,d,v,g,y,m,b,S,j,w,E,k,x"
+    },
+    {
+      "label": "the 4.6 MB chunk, working URL",
+      "url": "http://127.0.0.1:8936/lab/extensions/jupyterlab-plotly/static/0.03957c7088ad5ed0.js",
+      "status": 200,
+      "ms": 8,
+      "bytes": 4843340,
+      "contentType": "application/javascript",
+      "nosniff": "nosniff",
+      "acao": null,
+      "cacheControl": "public, max-age=31536000, immutable",
+      "head": "(self.rspackChunkjupyterlab_plotly=self.rspackChunkjupyterlab_plotly||[]).push([[0],{2(t,r"
+    }
+  ],
+  "checks": [
+    {
+      "label": "the plotly labextension is on disk where the claim says",
+      "pass": true,
+      "detail": "jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js 10.6 KiB"
+    },
+    {
+      "label": "a real `jupyter lab` DOES serve the prebuilt extension bytes at SOME URL",
+      "pass": true,
+      "detail": "lab/extensions/jupyterlab-plotly -> HTTP 200, 10.6 KiB, application/javascript"
+    },
+    {
+      "label": "the spelling /labextensions/<pkg>/static/<file> does NOT work here",
+      "pass": true,
+      "detail": "HTTP 404 text/html (jupyterlab \"4.6.3\")"
+    },
+    {
+      "label": "the working URL needs NO token (a <script src> can just load it)",
+      "pass": true,
+      "detail": "HTTP 200 with no credentials sent"
+    },
+    {
+      "label": "...and tolerates a ?token= query param as well",
+      "pass": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "label": "a nonexistent labextension path 404s (so the 200 is not a catch-all)",
+      "pass": true,
+      "detail": "HTTP 404"
+    },
+    {
+      "label": "the multi-MB chunk is served whole at the working URL",
+      "pass": true,
+      "detail": "HTTP 200, 4.62 MiB vs 4.62 MiB on disk"
+    },
+    {
+      "label": "content-type is JavaScript (a <script src> will accept it under nosniff)",
+      "pass": true,
+      "detail": "application/javascript"
+    }
+  ],
+  "notes": [
+    {
+      "label": "probe port",
+      "value": "8936"
+    },
+    {
+      "label": "versions",
+      "value": "{\"jupyterlab\":\"4.6.3\",\"jupyter_server\":\"2.21.1\",\"plotly\":\"7.1.0\"}"
+    },
+    {
+      "label": "labextensions on disk",
+      "value": "13 files, 4.65 MiB at /Users/dev-hale/.cache/uv/builds-v0/.tmpPtDQaQ/share/jupyter/labextensions"
+    },
+    {
+      "label": "jupyter lab up in",
+      "value": "1.6s"
+    },
+    {
+      "label": "/lab page bytes",
+      "value": "4698"
+    },
+    {
+      "label": "labextension-ish URLs in the lab page",
+      "value": "NONE"
+    },
+    {
+      "label": "lab/api/extensions body",
+      "value": "[{\"name\": \"jupyterlab-pygments\", \"description\": \"Pygments theme using JupyterLab CSS variables\", \"homepage_url\": \"https://github.com/jupyterlab/jupyterlab_pygments\", \"pkg_type\": \"prebuilt\", \"allowed\": true, \"approved\": false, \"companion\": null, \"core\": false, \"enabled\": true, \"install\": {\"packageMan"
+    },
+    {
+      "label": "THE URL THAT WORKS",
+      "value": "/lab/extensions/jupyterlab-plotly/static/remoteEntry.1dda3c8f6e5cd2a3.js"
+    },
+    {
+      "label": "Access-Control-Allow-Origin",
+      "value": "ABSENT  (needed for fetch() from origin \"null\"; NOT needed for <script src>)"
+    },
+    {
+      "label": "X-Content-Type-Options",
+      "value": "nosniff"
+    },
+    {
+      "label": "remoteEntry head",
+      "value": "var _JUPYTERLAB;(()=>{\"use strict\";var e,n,r,t,o,i,u,a,c,l,f,s,p,h,d,v,g,y,m,b,S,j,w,E,k,x"
+    },
+    {
+      "label": "lab/api/extensions",
+      "value": "HTTP 200, 1.3 KiB"
+    }
+  ]
+}

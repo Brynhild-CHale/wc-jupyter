@@ -1,0 +1,78 @@
+<div id="host" style="font:12px system-ui;padding:.5rem">
+  <b>JS-box capability probe</b>
+  <div id="status" style="color:#777"></div>
+  <div id="slot"></div>
+</div>
+<script>
+// Runs as a web-chat pane script: new Function(store, root, params, mountId).
+// Builds the sandboxed iframe the design proposes and has it report what it can
+// actually do. `params.origin` is a plain static server the driver started, so
+// this measures the BROWSER's rules (null origin, cross-origin transports) and
+// not Jupyter's auth, which is probed separately.
+const ORIGIN = params.origin;
+const slot = root.getElementById("slot");
+const status = root.getElementById("status");
+const say = (t) => { status.textContent = t; };
+
+// The box. No allow-same-origin: that is what makes the origin opaque, so the
+// frame cannot reach this document, its store, its cookies or its storage.
+const box = document.createElement("iframe");
+box.setAttribute("sandbox", "allow-scripts");
+box.style.cssText = "width:100%;height:90px;border:1px solid #ccc;background:#fff";
+
+// Everything the frame is asked to try. Built as a string because srcdoc is a
+// string; the closing script tag is split so this file can itself be inlined.
+const INNER = [
+  '<!doctype html><meta charset="utf-8"><body style="margin:0;font:11px system-ui">',
+  '<canvas id="cv" width="120" height="40"></canvas><div id="log"></div>',
+  '<' + 'script>',
+  'var R = { origin: String(document.location.origin) };',
+  'function done() { parent.postMessage(JSON.stringify(R), "*"); }',
+  // 1. isolation
+  'try { R.parentDom = (parent.document !== undefined); } catch (e) { R.parentDom = false; }',
+  'try { localStorage.setItem("x","1"); R.localStorage = true; } catch (e) { R.localStorage = false; }',
+  'try { R.cookies = (document.cookie, true); } catch (e) { R.cookies = false; }',
+  // 2. drawing
+  'try { var g = document.getElementById("cv").getContext("2d"); g.fillStyle="#036"; g.fillRect(0,0,120,40); R.canvas2d = true; } catch (e) { R.canvas2d = String(e); }',
+  'try { R.webgl = !!document.createElement("canvas").getContext("webgl"); } catch (e) { R.webgl = false; }',
+  // 3. static capture — the fallback for exports and thumbnails
+  'try { var u = document.getElementById("cv").toDataURL("image/png"); R.toDataURL = true; R.pngBytes = Math.round(u.length * 0.75); } catch (e) { R.toDataURL = String(e); }',
+  'try { var s = new XMLSerializer().serializeToString(document.createElementNS("http://www.w3.org/2000/svg","svg")); R.svgSerialize = s.length > 0; } catch (e) { R.svgSerialize = false; }',
+  // 4. cross-origin transports — the two ways renderer JS could arrive
+  'var pending = 2;',
+  'var s1 = document.createElement("script");',
+  's1.onload = function () { R.scriptTagCrossOrigin = true; R.libSaw = (window.__probeLib && window.__probeLib.ok) || false; if (!--pending) done(); };',
+  's1.onerror = function () { R.scriptTagCrossOrigin = false; if (!--pending) done(); };',
+  's1.src = "ORIGIN_HERE/probe-lib.js";',
+  'document.head.appendChild(s1);',
+  'fetch("ORIGIN_HERE/probe-lib.js").then(function (r) { R.fetchCrossOrigin = r.status; return r.text(); })',
+  '  .then(function () { if (!--pending) done(); })',
+  '  .catch(function (e) { R.fetchCrossOrigin = "blocked: " + String(e).slice(0, 60); if (!--pending) done(); });',
+  'setTimeout(function () { R.timedOut = true; done(); }, 6000);',
+  '<' + '/script></body>',
+].join("\n").split("ORIGIN_HERE").join(ORIGIN);
+
+let reported = false;
+const onMsg = (e) => {
+  let v; try { v = JSON.parse(e.data); } catch { return; }
+  if (!v || typeof v.origin === "undefined" || reported) return;
+  reported = true;
+  say("reported");
+  store.set({ jsbox_probe: { seq: Date.now(), ...v } });
+};
+window.addEventListener("message", onMsg);
+
+box.srcdoc = INNER;
+slot.appendChild(box);
+say("box mounted, waiting…");
+
+// 5. Survival: the notebook pane re-renders constantly. An iframe that is moved
+// in the DOM RELOADS, which would restart the plot and lose its state — so this
+// records whether the frame is the same element and whether it reloaded.
+let loads = 0;
+box.addEventListener("load", () => { loads++; store.set({ jsbox_loads: { seq: Date.now(), loads } }); });
+
+setTimeout(() => {
+  if (!reported) store.set({ jsbox_probe: { seq: Date.now(), timeout: true } });
+}, 9000);
+</script>

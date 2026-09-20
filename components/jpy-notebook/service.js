@@ -825,6 +825,7 @@ module.exports = {
       try {
         const active = tabs.find((t) => t.id === activeId);
         kernel = await acquireKernel(pick, active);
+        reconnects = 0;
         conn.kernel = { id: kernel.id, name: kernel.name };
         await openSocket();
         conn.ok = true; conn.state = 'connected'; conn.hint = null;
@@ -878,12 +879,41 @@ module.exports = {
           ws = null; conn.ok = false; conn.state = 'disconnected';
           // Whatever was running is not coming back on a socket that is gone.
           abortRuns('KernelDisconnected', 'The connection to the kernel closed while this cell was running, so its result is lost.');
-          conn.hint = 'The kernel socket closed. Press Reconnect.'; pushConn();
+          conn.hint = 'The kernel socket closed. Reconnecting\u2026'; pushConn();
+          reconnectSoon();
         }
       };
       sock.onmessage = (ev) => { try { onIopub(JSON.parse(ev.data)); } catch {} };
       setTimeout(() => { if (!settled) { settled = true; reject(new Error('kernel websocket timed out')); } }, 15000);
     });
+
+    // A socket that closes on its own is usually a kernel that died and was
+    // restarted IN PLACE: the id still resolves, so re-attaching is all that is
+    // needed and the user never has to learn about it. Without this the pane
+    // settles the dead cell correctly and is then wedged anyway — ws is null, so
+    // every later run answers NotConnected and nothing ever clears it.
+    //
+    // Bounded on purpose. If the server is genuinely gone, each retry is a failed
+    // connect, and saying so beats retrying for ever behind a hopeful banner.
+    let reconnects = 0;
+    const reconnectSoon = () => {
+      if (stopped || !server || !kernel) return;
+      if (reconnects >= 3) {
+        conn.ok = false; conn.state = 'disconnected';
+        conn.hint = 'The kernel socket closed and reconnecting failed. Press Reconnect.';
+        pushConn(); return;
+      }
+      const attempt = ++reconnects;
+      setTimeout(async () => {
+        if (stopped || ws) return;
+        try {
+          await openSocket();
+          conn.ok = true; conn.state = 'connected'; conn.error = null; conn.hint = null;
+          reconnects = 0;
+          pushConn();
+        } catch { reconnectSoon(); }
+      }, 300 * attempt).unref?.();
+    };
 
     // --- execution ---------------------------------------------------------
     // msg_id -> the cell it belongs to, plus the accumulator for its outputs.
@@ -928,8 +958,18 @@ module.exports = {
     // read as still alive, because a network blip must never be able to kill
     // someone's three-hour cell. It runs only while a cell is in flight and
     // clears itself the moment nothing is, so an idle pane costs nothing.
+    let kernelReady = null;   // set while something is waiting for the announcement
+    const waitKernelReady = (ms) => new Promise((resolve) => {
+      const t = setTimeout(() => { kernelReady = null; resolve(false); }, ms || 8000);
+      kernelReady = () => { clearTimeout(t); kernelReady = null; resolve(true); };
+    });
+
     let watchTimer = null;
-    const stopWatch = () => { if (watchTimer) { clearInterval(watchTimer); watchTimer = null; } };
+    let goneStreak = 0;
+    // True while a restart or a reconnect is deliberately tearing the kernel
+    // down. The watchdog must not read that window as a death.
+    let settling = false;
+    const stopWatch = () => { if (watchTimer) { clearInterval(watchTimer); watchTimer = null; } goneStreak = 0; };
     const kernelGone = async () => {
       if (!server || !kernel) return false;
       try {
@@ -944,7 +984,11 @@ module.exports = {
       if (watchTimer || stopped) return;
       watchTimer = setInterval(async () => {
         if (stopped || !pending.size) { stopWatch(); return; }
-        if (!(await kernelGone())) return;
+        if (settling) { goneStreak = 0; return; }
+        if (!(await kernelGone())) { goneStreak = 0; return; }
+        // One 404 is not proof: a restart replaces the kernel in place and the id
+        // is briefly unresolvable. Two in a row, ~10s apart, is.
+        if (++goneStreak < 2) return;
         const n = abortRuns('KernelGone', 'The kernel is no longer running, so this cell\'s result is lost.');
         if (n) {
           conn.ok = false; conn.state = 'error';
@@ -969,6 +1013,9 @@ module.exports = {
       // nothing ever learns the result is not coming.
       if (!rec && m && m.channel === 'iopub' && m.msg_type === 'status') {
         const st = m.content && m.content.execution_state;
+        // The announcement a restart is waiting on. Parentless, because it
+        // belongs to the kernel rather than to any cell.
+        if (kernelReady && (st === 'idle' || st === 'starting')) kernelReady();
         if (st === 'restarting' || st === 'autorestarting' || st === 'dead') {
           const n = abortRuns('KernelRestarted',
             'The kernel ' + (st === 'dead' ? 'died' : 'restarted') + ' while this cell was running, so its result is lost. ' +
@@ -1036,6 +1083,11 @@ module.exports = {
     };
 
     function execute(cellId_) {
+      // A restart replaces the socket. A request sent into that window is
+      // accepted by a channel that is about to be thrown away, and no idle ever
+      // comes back for it — the cell hangs at In [*] and the watchdog cannot
+      // help, because the kernel is not gone. Hold it and run it after.
+      if (settling) { queue.push(cellId_); return; }
       if (running) { queue.push(cellId_); return; }
       const tab = tabs.find((t) => t.id === activeId);
       const cell = tab && (tab.cells || []).find((c) => c.id === cellId_);
@@ -1407,6 +1459,10 @@ module.exports = {
         // Not pending.clear(): that dropped the in-flight record on the floor
         // and left its cell at In [*] with nothing ever coming to replace it.
         if (kind === 'restart') {
+          settling = true;
+          conn.ok = false; conn.state = 'restarting'; conn.error = null;
+          conn.hint = 'Restarting the kernel\u2026';
+          pushConn();
           abortRuns('KernelRestarted', 'The kernel was restarted while this cell was running, so its result is lost.');
           // ...and REBIND the socket. A restart replaces the kernel process; the
           // existing socket stays open and readyState 1, but it is attached to
@@ -1418,12 +1474,20 @@ module.exports = {
           // itself, which is why only the deliberate path was broken.)
           try {
             await openSocket();
+            // Channel up is not kernel up. Wait for the kernel to say so, and if
+            // it never does, say that rather than pretending.
+            const ready = await waitKernelReady(8000);
+            conn.ok = true; conn.state = 'connected'; conn.error = null;
+            conn.hint = ready ? null : 'The kernel did not report ready after the restart; the next run may be slow.';
+            reconnects = 0;
           } catch (e) {
             conn.ok = false; conn.state = 'error';
             conn.error = 'Reconnecting after the restart failed: ' + String((e && e.message) || e);
             conn.hint = 'Press Reconnect.';
-            pushConn();
           }
+          settling = false;
+          pushConn();
+          runNext();   // drain anything the user asked for while it was down
         }
       } catch (e) { ctx.log(kind + ' failed: ' + e.message); }
     };
