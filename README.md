@@ -73,6 +73,38 @@ leaves every cell at `In [*]` for ever.
 The fix for a leak, but also better manners — JupyterLab pointed at the same server now shows
 your notebook as *running* rather than showing an anonymous kernel nobody claims.
 
+## When a kernel dies under a running cell
+
+There is one way a run ends normally: iopub `status{execution_state:'idle'}` for that
+cell's `msg_id`. A kernel that dies never sends one, so every other way a run can end has
+to be handled explicitly or the cell hangs at `In [*]` **and takes the whole pane with
+it** — `running` stays true, so every later run queues behind a cell that will never
+finish and writes nothing at all. You press Run and nothing happens, while the banner
+still says kernel ready.
+
+Four things end a run without an idle, and all of them settle it as an error:
+
+- **The kernel died and the server auto-restarted it.** The only announcement is an iopub
+  `status{execution_state:'restarting'}` with an **empty `parent_header`** — it belongs to
+  no cell, so it has to be read *before* the per-cell dispatch that would drop it. The
+  socket stays open throughout, so nothing else ever says anything.
+- **The socket closed.** Whatever was in flight is not coming back on a socket that is gone.
+- **A deliberate Restart.** This one also **rebinds the socket**: a restart replaces the
+  kernel *process*, and the old socket stays open and `readyState 1` while being attached
+  to something that no longer exists — so the next `execute_request` is accepted and
+  simply never answered. Measured: without the rebind, a run two seconds after a restart
+  hangs indefinitely. An auto-restart does *not* need this; the server rebinds that one
+  itself, which is why only the deliberate path was broken.
+- **The kernel vanished without announcing anything**, e.g. it was deleted out from under
+  us. A watchdog polls only while a cell is actually in flight, and only a *definitive*
+  answer counts — a 404, or an explicit `dead`. A throw, a 5xx or a timeout is read as
+  still alive, because a network blip must never be able to kill someone's three-hour cell.
+
+`test/death-harness.mjs` covers all four against a live kernel, including a real SIGSEGV
+(the shape an OOM kill or a bad native wheel takes). Its load-bearing assertion is not
+that the dead cell reports an error — it is that **the next run works, without the user
+having to know to press Restart**.
+
 ## Layout
 
 ```
@@ -109,16 +141,9 @@ including the one rule worth knowing before you add a suite: release every kerne
 ## Known issues
 
 Found by an audit of the kernel-protocol layer against the Jupyter messaging spec, each one
-reproduced against a live kernel before being written down. None is fixed yet; they are here
-rather than quiet.
+reproduced against a live kernel before being written down. The kernel-death hang that headed
+this list is fixed (see below); the rest are open, and here rather than quiet.
 
-- **A kernel that dies mid-execution hangs the pane silently.** The completion predicate is
-  iopub `status{execution_state:'idle'}` for our `msg_id`, and a dead kernel never sends one —
-  the server's `status{execution_state:'restarting'}` arrives with an *empty* parent_header and
-  is dropped. So the cell sits at `In [*]` for ever, `running` stays true, and every later Run
-  queues behind it and writes nothing at all. The connection banner still reads "kernel ready".
-  Restart or Reconnect is the only way out, and nothing says so. This is the worst of the set:
-  a segfault in a C extension, or an OOM kill, puts the pane here.
 - **A tab switch during Run All runs cells against the wrong notebook.** Queued cells are
   resolved against whichever tab is active when each one dequeues, not the tab the run started
   on.

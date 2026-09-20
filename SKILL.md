@@ -341,6 +341,21 @@ and `renderCells` re-measures on the transition out of hidden. Without both halv
 - **A cell is done on iopub `status{execution_state:'idle'}` for its `msg_id`, not on
   `execute_reply`.** Measured against a live kernel: the reply arrives *first*. Finishing on
   it truncates trailing output.
+- **An idle is the only NORMAL end to a run, so every abnormal one needs its own handler.**
+  A dead kernel never sends an idle. Until that was handled, the cell sat at `In [*]` for
+  ever and `running` stayed true, so every later run queued behind it and wrote nothing —
+  the user pressed Run and the pane did not acknowledge it, with the banner still green.
+  Four paths now settle a run without an idle: a parentless
+  `status{execution_state:'restarting'}` (an auto-restart after a crash — it belongs to no
+  cell, so it must be read before the per-cell dispatch drops it), a socket close, a
+  deliberate restart, and a watchdog for a kernel that vanishes silently.
+- **A deliberate restart needs the socket REBOUND.** It replaces the kernel process while
+  the old socket stays open and `readyState 1`, bound to something gone — the next
+  `execute_request` is accepted and never answered. An auto-restart does not need this; the
+  server rebinds that one itself.
+- **Only a definitive answer may kill a running cell.** The kernel watchdog treats a 404 or
+  an explicit `dead` as gone and everything else — a throw, a 5xx, a timeout — as alive. A
+  network blip must never be able to end someone's long-running cell.
 - **The execution count comes from `execute_input`, never from `execute_result`.**
   `execute_input` is broadcast at the START of every execution and always carries
   `execution_count` — it is why JupyterLab can show `In [5]` the moment a cell begins.

@@ -56,6 +56,7 @@ const VIEW_OPS = new Set(['set-tab', 'reload', 'discover', 'browse', 'open']);
 // is told it bit rather than silently showing less than the kernel produced.
 const MAX_OUT_BYTES = 256 * 1024;   // per cell, across all its outputs
 const MAX_STREAM_CHARS = 40000;     // per cell, stdout+stderr combined
+const KERNEL_WATCH_MS  = 10000;     // how often to ask whether a running cell's kernel still exists
 // PER CELL, and deliberately not a per-notebook budget. The original drained:
 // each cell was sliced against what was LEFT, so once it hit zero every later
 // cell became the empty string with truncated=true. That alone was survivable
@@ -860,7 +861,14 @@ module.exports = {
     };
 
     const openSocket = () => new Promise((resolve, reject) => {
-      try { if (ws) ws.close(); } catch {}
+      // Detach the old socket BEFORE closing it. onclose treats a close as a
+      // lost connection — it marks the pane disconnected and settles every
+      // running cell — and replacing the socket deliberately is not that. The
+      // `ws === sock` guard below is what tells the two apart, so the old
+      // socket has to stop being `ws` first.
+      const old = ws;
+      ws = null;
+      try { if (old) old.close(); } catch {}
       const sock = new WebSocket(wsUrl(server, kernel.id));
       let settled = false;
       sock.onopen = () => { settled = true; ws = sock; resolve(); };
@@ -868,6 +876,8 @@ module.exports = {
       sock.onclose = () => {
         if (ws === sock && !stopped) {
           ws = null; conn.ok = false; conn.state = 'disconnected';
+          // Whatever was running is not coming back on a socket that is gone.
+          abortRuns('KernelDisconnected', 'The connection to the kernel closed while this cell was running, so its result is lost.');
           conn.hint = 'The kernel socket closed. Press Reconnect.'; pushConn();
         }
       };
@@ -890,9 +900,86 @@ module.exports = {
       push({ ['jpy_out_' + rec.cellId]: { seq: ++seq, state: rec.state, outputs, exec_count: rec.execCount, bytes } });
     };
 
+    // Settle every cell in flight and free the run queue.
+    //
+    // There was exactly ONE way out of a run — iopub idle for that cell's
+    // msg_id — and a kernel that dies never sends one. So the cell stayed at
+    // In [*] for ever, `running` stayed true, and every later run queued behind
+    // it and wrote NOTHING to the store: the user pressed Run and the pane did
+    // not so much as acknowledge it, while the banner still said kernel ready.
+    // Everything that can end a run without an idle comes through here.
+    const abortRuns = (ename, evalue) => {
+      const hit = [...pending.values()];
+      pending.clear();
+      queue.length = 0;
+      running = false;
+      stopWatch();
+      for (const rec of hit) {
+        rec.state = 'error';
+        rec.outputs.push({ kind: 'error', ename, evalue, traceback: '' });
+        flush(rec);
+      }
+      return hit.length;
+    };
+
+    // Belt and braces for a death that announces NOTHING — no lifecycle status,
+    // no socket close. Only a DEFINITIVE answer counts: a 404 from the server,
+    // or an explicit 'dead'. Anything uncertain — a throw, a 5xx, a timeout — is
+    // read as still alive, because a network blip must never be able to kill
+    // someone's three-hour cell. It runs only while a cell is in flight and
+    // clears itself the moment nothing is, so an idle pane costs nothing.
+    let watchTimer = null;
+    const stopWatch = () => { if (watchTimer) { clearInterval(watchTimer); watchTimer = null; } };
+    const kernelGone = async () => {
+      if (!server || !kernel) return false;
+      try {
+        const r = await fetch(server.url + 'api/kernels/' + encodeURIComponent(kernel.id), { headers: authHeaders(server.token) });
+        if (r.status === 404) return true;
+        if (!r.ok) return false;
+        const k = await r.json();
+        return !!(k && k.execution_state === 'dead');
+      } catch { return false; }
+    };
+    const armWatch = () => {
+      if (watchTimer || stopped) return;
+      watchTimer = setInterval(async () => {
+        if (stopped || !pending.size) { stopWatch(); return; }
+        if (!(await kernelGone())) return;
+        const n = abortRuns('KernelGone', 'The kernel is no longer running, so this cell\'s result is lost.');
+        if (n) {
+          conn.ok = false; conn.state = 'error';
+          conn.error = 'The kernel is gone.';
+          conn.hint = 'Press Restart to start a new one.';
+          pushConn();
+        }
+        stopWatch();
+      }, KERNEL_WATCH_MS);
+      // Never hold the process open for a poll.
+      if (watchTimer.unref) watchTimer.unref();
+    };
+
     function onIopub(m) {
       const parent = m && m.parent_header && m.parent_header.msg_id;
       const rec = parent && pending.get(parent);
+      // A kernel-lifecycle status belongs to NO cell: it arrives with an empty
+      // parent_header, so it has to be read before the per-cell guard below,
+      // which used to drop it. It is the only thing the server says when a
+      // kernel dies under a running cell — jupyter_server auto-restarts it and
+      // broadcasts 'restarting' while the socket stays open, so without this
+      // nothing ever learns the result is not coming.
+      if (!rec && m && m.channel === 'iopub' && m.msg_type === 'status') {
+        const st = m.content && m.content.execution_state;
+        if (st === 'restarting' || st === 'autorestarting' || st === 'dead') {
+          const n = abortRuns('KernelRestarted',
+            'The kernel ' + (st === 'dead' ? 'died' : 'restarted') + ' while this cell was running, so its result is lost. ' +
+            'The kernel is fresh — anything the notebook had defined is gone. Re-run the cells you need.');
+          if (n) {
+            conn.hint = 'The kernel restarted mid-run, so ' + n + ' cell(s) were stopped. Its state is gone; re-run what you need.';
+            pushConn();
+          }
+          return;
+        }
+      }
       if (!rec) return;
       if (m.channel === 'iopub') {
         if (m.msg_type === 'stream') {
@@ -971,6 +1058,7 @@ module.exports = {
       const m = msg('execute_request', { code: cell.source, silent: false, store_history: true, allow_stdin: false, stop_on_error: true }, session);
       const rec = { cellId: cellId_, outputs: [], state: 'busy', execCount: null, lastFlush: 0 };
       pending.set(m.id, rec);
+      armWatch();
       flush(rec);
       try { ws.send(m.frame); } catch (e) {
         pending.delete(m.id);
@@ -1316,7 +1404,27 @@ module.exports = {
       if (!server || !kernel) return;
       try {
         await fetch(server.url + 'api/kernels/' + kernel.id + '/' + kind, { method: 'POST', headers: authHeaders(server.token) });
-        if (kind === 'restart') { queue.length = 0; pending.clear(); running = false; }
+        // Not pending.clear(): that dropped the in-flight record on the floor
+        // and left its cell at In [*] with nothing ever coming to replace it.
+        if (kind === 'restart') {
+          abortRuns('KernelRestarted', 'The kernel was restarted while this cell was running, so its result is lost.');
+          // ...and REBIND the socket. A restart replaces the kernel process; the
+          // existing socket stays open and readyState 1, but it is attached to
+          // something that no longer exists, so the next execute_request is
+          // accepted and simply never answered — the next cell you run hangs at
+          // In [*] for ever. Measured: without this, a run 2s after a restart
+          // gets a busy flush and then nothing, indefinitely. (An AUTO-restart
+          // after a crash does not need this; the server rebinds that one
+          // itself, which is why only the deliberate path was broken.)
+          try {
+            await openSocket();
+          } catch (e) {
+            conn.ok = false; conn.state = 'error';
+            conn.error = 'Reconnecting after the restart failed: ' + String((e && e.message) || e);
+            conn.hint = 'Press Reconnect.';
+            pushConn();
+          }
+        }
       } catch (e) { ctx.log(kind + ' failed: ' + e.message); }
     };
 
@@ -1385,7 +1493,7 @@ module.exports = {
           // Land edits on the OLD server before the base moves, and do not leave
           // queued cells wedged in 'busy' against a kernel that is going away.
           if (server && conn.ok) { try { await flushAll(); } catch {} }
-          queue.length = 0; pending.clear(); running = false;
+          abortRuns('KernelDisconnected', 'The kernel connection was replaced while this cell was running, so its result is lost.');
           const old = server && kernel ? { s: server, k: kernel } : null;
           await connect(c.index);
           if (old && (!kernel || old.k.id !== kernel.id)) {
