@@ -354,6 +354,13 @@ is how the reconnect-window bug was found, because no headless harness has a bro
   changes `service.js`, so it re-asks for trust, and it invalidates existing journals for a
   notebook (their snapshots hold the old bare ids) — worth doing deliberately, not as a
   drive-by.
+- **vega/altair has no renderer that ships with the Python package**, so `jpy_render`
+  reports `available: false` for it rather than guessing a version off a CDN. There is no
+  need for one: `alt.renderers.enable('svg')` makes altair emit `image/svg+xml` directly
+  (measured: 13,151 B for a 12-bar chart), which the ladder renders as a `data:` URI. Tell
+  the user that line rather than adding a network dependency. `vl-convert-python` is the
+  same answer with more control, and `alt.renderers.enable('png')` is currently broken
+  upstream (`TypeError: Object of type bytes is not JSON serializable` on altair 6.3.0).
 - **A notebook the contents API cannot address gets a bare kernel, and that one does leak.**
   Kernel acquisition goes through Jupyter **sessions** (see below), which are keyed on a path
   inside the server root. A notebook outside it has no such path — the same reason it cannot
