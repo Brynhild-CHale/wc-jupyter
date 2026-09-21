@@ -134,6 +134,9 @@
   .md h1 { font-size: 1.5em; } .md h2 { font-size: 1.25em; } .md h3 { font-size: 1.1em; }
   .md h1, .md h2, .md h3, .md h4 { margin: .5em 0 .3em; line-height: 1.25; }
   .md p { margin: .4em 0; } .md ul, .md ol { margin: .4em 0; padding-left: 1.4em; }
+  .md table { border-collapse: collapse; font-size: 12px; margin: .4em 0; }
+  .md th, .md td { border: 1px solid var(--jpy-line); padding: .18rem .5rem; text-align: left; }
+  .md th { background: var(--jpy-well); font-weight: 600; }
   .md code, .inline-code { font: .92em var(--wc-mono, ui-monospace, monospace);
     background: var(--jpy-well); padding: .08em .3em; border-radius: 3px; }
   .cellbar { grid-column: 2; display: flex; gap: .3rem; opacity: 0; transition: opacity .12s; padding: .1rem 0; }
@@ -247,6 +250,13 @@
   // srcOf() is the single place that answers 'what does the FILE say this cell
   // holds' — the live buffer is always `edits`.
   const srcs = new Map();
+  // The renderer manifest (versions + loopback URLs). Tiny by design — the
+  // bytes never come through here.
+  let renderCfg = null;
+  // cellId -> { png } handed back by the box, so previews and exports have
+  // something to show where a frame cannot run.
+  const caps = new Map();
+  const srcCap = (id) => caps.get(id) || null;
   const srcOf = (id) => { const v = srcs.get(id); return v && typeof v.source === 'string' ? v.source : ''; };
 
   // --- ANSI SGR -> spans ---------------------------------------------------
@@ -287,6 +297,9 @@
   // --- markdown subset -----------------------------------------------------
   // Built with createElement from the cell's own text. Deliberately small:
   // headings, emphasis, inline code, fenced code, lists, links, rules.
+  const isTableStart = (lines, i) =>
+    /^\s*\|.*\|\s*$/.test(lines[i] || "") && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] || "");
+
   function markdown(src, into) {
     const lines = String(src).split("\n");
     let i = 0, list = null;
@@ -334,10 +347,32 @@
         if (!list || list.tagName.toLowerCase() !== (ordered ? "ol" : "ul")) { endList(); list = el(ordered ? "ol" : "ul"); }
         const li = el("li"); inline(line.replace(/^\s*([-*+]|\d+\.)\s+/, ""), li); list.appendChild(li); i++; continue;
       }
+      // A GFM table: a row of pipes whose NEXT line is a delimiter row. The
+      // second line is what makes it a table rather than a paragraph that
+      // happens to contain pipes, so both are required before committing.
+      if (isTableStart(lines, i)) {
+        endList();
+        const cut = (r) => r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((x) => x.trim());
+        const align = cut(lines[i + 1]).map((c) => (/^:-+:$/.test(c) ? "center" : /-+:$/.test(c) ? "right" : /^:-+/.test(c) ? "left" : ""));
+        const table = el("table");
+        const head = el("tr");
+        cut(line).forEach((c, k) => { const th = el("th"); if (align[k]) th.style.textAlign = align[k]; inline(c, th); head.appendChild(th); });
+        const thead = el("thead"); thead.appendChild(head); table.appendChild(thead);
+        i += 2;
+        const tbody = el("tbody");
+        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+          const tr = el("tr");
+          cut(lines[i]).forEach((c, k) => { const td = el("td"); if (align[k]) td.style.textAlign = align[k]; inline(c, td); tr.appendChild(td); });
+          tbody.appendChild(tr); i++;
+        }
+        table.appendChild(tbody); into.appendChild(table); continue;
+      }
       if (/^\s*(---|\*\*\*|___)\s*$/.test(line)) { endList(); into.appendChild(el("hr")); i++; continue; }
       if (!line.trim()) { endList(); i++; continue; }
       const buf = [];
-      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*([-*+]|\d+\.)\s)/.test(lines[i])) buf.push(lines[i++]);
+      while (i < lines.length && lines[i].trim()
+             && !/^(#{1,6}\s|```|\s*([-*+]|\d+\.)\s)/.test(lines[i])
+             && !isTableStart(lines, i)) buf.push(lines[i++]);
       endList();
       const p = el("p"); inline(buf.join(" "), p); into.appendChild(p);
     }
@@ -345,7 +380,113 @@
   }
 
   // --- outputs -------------------------------------------------------------
-  function renderOutput(o, into) {
+  // --- the JS box ----------------------------------------------------------
+  // A vendor payload (a plotly figure, a vega chart) is a SPEC plus a renderer,
+  // and the renderer is several megabytes of third-party JavaScript. It does not
+  // run in this pane: it runs in an <iframe sandbox="allow-scripts"> with no
+  // allow-same-origin, which gives it an opaque origin — measured: it cannot
+  // reach this document, the store, cookies or localStorage. The only channel
+  // back is postMessage.
+  //
+  // The renderer arrives by <script src> from the service's loopback server.
+  // Not fetch(): there is no CORS on it, deliberately, so nothing else in the
+  // browser can read those bytes. A classic script tag needs none.
+  const ADAPTERS = {
+    plotly:
+      'var gd = window.v;' +
+      'Plotly.newPlot(gd, S.data || [], S.layout || {}, {responsive: true, displaylogo: false})' +
+      '  .then(function () { return Plotly.toImage(gd, {format: "png", width: W, height: H}); })' +
+      '  .then(function (uri) { done(true, null, uri); })' +
+      '  .catch(function (e) { done(false, String(e && e.message || e), null); });',
+    vega:
+      'vegaEmbed("#v", S, {actions: false})' +
+      '  .then(function (r) { return r.view.toImageURL("png"); })' +
+      '  .then(function (uri) { done(true, null, uri); })' +
+      '  .catch(function (e) { done(false, String(e && e.message || e), null); });',
+  };
+
+  const boxDoc = (rend, o, w, h) => [
+    '<!doctype html><meta charset="utf-8">',
+    '<style>html,body{margin:0;padding:0;overflow:hidden;font:12px system-ui}',
+    '#v{width:100%;height:100%}#e{color:#b00;padding:6px;font:11px system-ui;white-space:pre-wrap}</style>',
+    '<body><div id="v"></div><div id="e" hidden></div>',
+    '<' + 'script>',
+    'var S = ', JSON.stringify(o.spec), ';',
+    'var W = ', String(w), ', H = ', String(h), ';',
+    'var sent = false;',
+    'function done(ok, err, png) {',
+    '  if (sent) return; sent = true;',
+    '  if (!ok) { var e = window.e; e.hidden = false; e.textContent = err || "render failed"; }',
+    '  parent.postMessage(JSON.stringify({__jpy: 1, ok: ok, error: err || null, png: png || null}), "*");',
+    '}',
+    'window.onerror = function (m) { done(false, String(m), null); };',
+    'var s = document.createElement("script");',
+    's.onload = function () { try {', ADAPTERS[o.renderer] || 'done(false, "no adapter", null);', '} catch (e) { done(false, String(e), null); } };',
+    's.onerror = function () { done(false, "the renderer did not load", null); };',
+    's.src = ', JSON.stringify(rend.url), ';',
+    'document.head.appendChild(s);',
+    'setTimeout(function () { done(false, "renderer timed out", null); }, 20000);',
+    '<' + '/script>',
+  ].join('');
+
+  // The picture the box hands back. It is what a graph thumbnail and an export
+  // show, because a preview's CSP blocks frames outright (default-src 'none',
+  // no frame-src) and an exported file has no localhost to fetch a renderer
+  // from. Without it those surfaces show a hole where the plot was.
+  const CAP_MAX = 200 * 1024;
+
+  function jsBox(o, into, cellId) {
+    const rend = (renderCfg && renderCfg.renderers && renderCfg.renderers[o.renderer]) || null;
+    const cap = srcCap(cellId);
+    const wrap = el("div", "vendor");
+
+    // Always build the still first, so it is what shows if the frame never runs.
+    if (cap && cap.png) {
+      const img = el("img");
+      img.src = cap.png; img.alt = o.renderer + " figure";
+      img.style.cssText = "max-width:100%;height:auto;display:block";
+      wrap.appendChild(img);
+    }
+
+    if (!rend || !rend.available) {
+      // No renderer: say which one and why, and show whatever repr the kernel
+      // gave us rather than nothing.
+      if (!cap || !cap.png) {
+        if (o.plain) { const pre = el("pre"); pre.textContent = o.plain; wrap.appendChild(pre); }
+        const b = el("span", "badge", o.renderer + " not installed — " + ((rend && rend.why) || "renderers are off"));
+        wrap.appendChild(b);
+      }
+      into.appendChild(wrap);
+      return;
+    }
+
+    const lay = (o.spec && o.spec.layout) || {};
+    const w = Math.max(160, Math.min(2000, Number(lay.width) || 640));
+    const h = Math.max(120, Math.min(1400, Number(lay.height) || 320));
+
+    const f = document.createElement("iframe");
+    f.setAttribute("sandbox", "allow-scripts");   // NO allow-same-origin, ever
+    f.setAttribute("data-no-persist", "");
+    f.style.cssText = "width:100%;max-width:" + w + "px;height:" + h + "px;border:0;display:block";
+    f.srcdoc = boxDoc(rend, o, w, h);
+
+    const onMsg = (e) => {
+      if (e.source !== f.contentWindow) return;      // only OUR frame
+      let v; try { v = JSON.parse(e.data); } catch { return; }
+      if (!v || v.__jpy !== 1) return;
+      window.removeEventListener("message", onMsg);
+      if (v.ok && typeof v.png === "string" && v.png.length < CAP_MAX * 1.4) {
+        const prev = srcCap(cellId);
+        if (!prev || prev.png !== v.png) store.set({ ["jpy_cap_" + cellId]: { seq: nextSeq(), png: v.png } });
+      }
+      if (v.ok) { for (const ch of [...wrap.children]) if (ch.tagName === "IMG") ch.remove(); }
+    };
+    window.addEventListener("message", onMsg);
+    wrap.appendChild(f);
+    into.appendChild(wrap);
+  }
+
+  function renderOutput(o, into, cellId) {
     if (o.kind === "stream") {
       const box = el("div", "out" + (o.name === "stderr" ? " stderr" : ""));
       const pre = el("pre"); ansi(o.text, pre); box.appendChild(pre);
@@ -380,7 +521,13 @@
       img.src = "data:" + o.mime + ";base64," + o.b64;
       fig.append(img, cap);
       box.appendChild(fig);
-    } else if (o.kind === "markdown") { const m = el("div", "md"); markdown(o.text, m); box.appendChild(m); }
+    } else if (o.kind === "vendor") { jsBox(o, box, cellId); }
+    else if (o.kind === "unrenderable") {
+      // It used to be dropped with no trace. Name it.
+      const b = el("span", "badge", "no renderer for " + (o.mimes || []).join(", "));
+      box.appendChild(b);
+    }
+    else if (o.kind === "markdown") { const m = el("div", "md"); markdown(o.text, m); box.appendChild(m); }
     else if (o.kind === "json" || o.kind === "text") { const pre = el("pre"); ansi(o.text, pre); box.appendChild(pre); }
     else if (o.kind === "too-big") {
       box.appendChild(el("div", "note", "output withheld — " + o.mime + ", " + Math.round(o.bytes / 1024) + " KB. Large outputs are capped so they do not ride into every committed graph node."));
@@ -709,7 +856,7 @@
         n.outSeq = oseq;
         if (out && out.outputs && out.outputs.length) {
           n.outCol.replaceChildren();
-          for (const o of out.outputs) renderOutput(o, n.outCol);
+          for (const o of out.outputs) renderOutput(o, n.outCol, c.id);
           if (out.state === "saved") n.outCol.appendChild(el("span", "badge", "from file — not run in this session"));
           n.outPrompt.textContent = out.state === "saved" ? "Out[" + (count == null ? " " : count) + "]:" : "";
           n.outWrap.hidden = false;
@@ -958,6 +1105,8 @@
   }
 
   store.subscribe("jpy_hist", (h) => { hist = h || null; paintHist(h); renderCells(); });
+  store.subscribe("jpy_render", (v) => { renderCfg = v || null; renderCells(); });
+  renderCfg = store.get("jpy_render") || null;
   store.subscribe("jpy_save", (v) => {
     saveState = v || null;
     if (v && v.state === "saved") {
@@ -1037,6 +1186,13 @@
         if (seeded) srcs.set(c.id, seeded);
         const seededOut = store.get("jpy_out_" + c.id);
         if (seededOut) outs.set(c.id, seededOut);
+        const offCap = store.subscribe("jpy_cap_" + c.id, (v) => {
+          if (v) caps.set(c.id, v); else caps.delete(c.id);
+        });
+        const seededCap = store.get("jpy_cap_" + c.id);
+        if (seededCap) caps.set(c.id, seededCap);
+        const prevUn = unsubs.get(c.id);
+        unsubs.set(c.id, () => { if (prevUn) prevUn(); offCap(); });
         unsubs.set(c.id, () => { offOut(); offSrc(); });
       }
     }

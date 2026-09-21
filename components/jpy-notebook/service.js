@@ -40,6 +40,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const http = require('http');
 
 // Ops that are safe to replay after a respawn or a node navigation, because they
 // only change what is being LOOKED AT. Everything else (run, run-all, restart,
@@ -49,7 +50,10 @@ const crypto = require('crypto');
 // a case body with `discover`, so a persisted {op:'discover', index:N} replayed
 // above the start-time floor on every respawn — silently re-anchoring which
 // server was connected AND starting a kernel that nothing ever deleted.
-const VIEW_OPS = new Set(['set-tab', 'reload', 'discover', 'browse', 'open']);
+// 'renderers' is a read-only re-probe, so replaying it is harmless. 'install' is
+// deliberately NOT here: it has a side effect and must not be replayed by graph
+// navigation.
+const VIEW_OPS = new Set(['set-tab', 'reload', 'discover', 'browse', 'open', 'renderers']);
 
 // Per-cell output budget. The store is snapshotted into every committed node, so
 // this is a hard cap rather than an advisory one — and when it bites, the pane
@@ -65,6 +69,147 @@ const KERNEL_WATCH_MS  = 10000;     // how often to ask whether a running cell's
 // ones, destroying the only evidence. A per-cell cap bounds one pathological
 // cell without ever touching its neighbours.
 const MAX_CELL_SOURCE_CHARS = 100000;
+// A vendor spec (a plotly figure, a vega-lite chart) gets its own budget, kept
+// clear of MAX_OUT_BYTES. Measured: a 200-point figure is ~1.3 KB but a
+// 20,000-point Scattergl is 267 KiB, which the per-cell cap already refuses —
+// so without a separate allowance the feature is useless on real notebooks.
+const MAX_SPEC_BYTES = 2 * 1024 * 1024;
+// The picture handed back from the JS box, kept so previews, exports and graph
+// thumbnails show something rather than a hole. This one DOES live in the store,
+// so it is capped hard.
+const MAX_CAPTURE_BYTES = 200 * 1024;
+
+// ---------------------------------------------------------------------------
+// Renderer assets
+// ---------------------------------------------------------------------------
+// The renderer cannot reach the pane through the store: plotly.min.js is 4.59 MiB
+// and the whole store is copied into every committed graph node and appended to
+// a 1000-entry event ring — measured at ~1.2M tokens for ONE get_store. It cannot
+// come down the kernel either; jupyter_server's iopub rate limit silently
+// discards a payload that size. And it cannot be fetched from the Jupyter server,
+// whose extension route belongs to jupyterlab_server and serves a
+// module-federation container rather than a library.
+//
+// So the service serves it: a loopback HTTP server handing out exactly the files
+// it resolved from the kernel, addressed by an unguessable id, with the URL (not
+// the bytes) going through the store. The JS box loads it with a classic
+// <script src>, which needs no CORS — the one transport measured working end to
+// end, all the way to pixels in a real browser.
+// Where each renderer's JavaScript lives INSIDE the python package that emits
+// the mime type, so the renderer is version-matched to the thing that produced
+// the payload. Measured: plotly ships a plain UMD defining window.Plotly; altair
+// ships no JavaScript at all, which is why vega has no local source here and
+// says so rather than guessing a version off a CDN.
+const RENDERERS = {
+  plotly: {
+    global: 'Plotly',
+    // /application\/vnd\.plotly\.v(\d+)\+json/
+    mime: /^application\/vnd\.plotly\.v(\d+)\+json$/,
+    probe: 'import plotly, pathlib\n' +
+      "p = pathlib.Path(plotly.__file__).parent / 'package_data' / 'plotly.min.js'\n" +
+      '_r = {"version": plotly.__version__, "path": str(p) if p.is_file() else None}',
+  },
+  vega: {
+    global: 'vegaEmbed',
+    // altair 6 spells it with a DOT (vnd.vegalite.v6.json) while 5 and 4 use
+    // +json, and altair 6's own source contains both. Matching only '+json'
+    // ships the feature broken for current altair.
+    mime: /^application\/vnd\.(vegalite|vega)\.v(\d+)[.+]json$/,
+    probe: 'import importlib, pathlib\n' +
+      '_r = {"version": None, "path": None}\n' +
+      "for _m in ('vega', 'altair_viewer'):\n" +
+      '    try:\n' +
+      '        _mod = importlib.import_module(_m)\n' +
+      "    except Exception:\n        continue\n" +
+      "    _c = [q for q in pathlib.Path(_mod.__file__).parent.rglob('*.js') if q.stat().st_size > 200000]\n" +
+      '    if _c:\n' +
+      '        _r = {"version": getattr(_mod, "__version__", None), "path": str(sorted(_c, key=lambda q: -q.stat().st_size)[0])}\n' +
+      '        break',
+  },
+};
+
+// The demo notebook, carried IN the service because that is the only way it can
+// ship: a pack installs components, themes and one SKILL.md, and nothing else —
+// there is no mechanism for a data file. Kept as one string so it is written
+// byte-identically wherever it lands, and so demo/signal-quality.ipynb in the
+// repo can be checked against it (test/demo-harness.mjs does exactly that).
+const DEMO_NOTEBOOK = "{\"cells\":[{\"cell_type\":\"markdown\",\"id\":\"b207d6a4\",\"metadata\":{},\"source\":[\"# Signal quality across three sensor arrays\\n\",\"\\n\",\"A short analysis that also happens to exercise everything this pane can render.\\n\",\"\\n\",\"**What's here**\\n\",\"\\n\",\"- `pandas` frames as real tables\\n\",\"- `matplotlib` as **raster** and as **vector**\\n\",\"- an *interactive* `plotly` figure, drawn in a sandboxed frame\\n\",\"- streamed output, ANSI colour, JSON, rendered Markdown\\n\",\"- a traceback, and two honest failures at the bottom\\n\",\"\\n\",\"> Everything below runs against a kernel you started. Nothing is pre-baked.\"]},{\"cell_type\":\"code\",\"id\":\"6cfa46c9\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"import numpy as np, pandas as pd, io, json, time, sys\\n\",\"from IPython.display import display, Image, SVG, Markdown, JSON, Math\\n\",\"\\n\",\"rng = np.random.default_rng(20260920)\\n\",\"print(\\\"numpy\\\", np.__version__, \\\"| pandas\\\", pd.__version__)\\n\",\"print(\\\"ready\\\")\"]},{\"cell_type\":\"markdown\",\"id\":\"a47fa8c0\",\"metadata\":{},\"source\":[\"## The data\\n\",\"\\n\",\"Three arrays, 2,000 samples each, with a shared drift term and array-specific noise.\"]},{\"cell_type\":\"code\",\"id\":\"cc825904\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"N = 2000\\n\",\"t = np.linspace(0, 8 * np.pi, N)\\n\",\"drift = 0.35 * np.sin(t / 6)\\n\",\"\\n\",\"arrays = {}\\n\",\"for name, amp, noise, phase in [(\\\"north\\\", 1.00, 0.22, 0.0),\\n\",\"                                (\\\"ridge\\\", 0.78, 0.35, 0.6),\\n\",\"                                (\\\"delta\\\", 1.24, 0.14, 1.9)]:\\n\",\"    arrays[name] = amp * np.sin(t + phase) + drift + rng.normal(0, noise, N)\\n\",\"\\n\",\"df = pd.DataFrame(arrays, index=pd.Index(np.round(t, 3), name=\\\"t\\\"))\\n\",\"df.head(8)\"]},{\"cell_type\":\"markdown\",\"id\":\"d2959bc1\",\"metadata\":{},\"source\":[\"## Summary statistics\"]},{\"cell_type\":\"code\",\"id\":\"2e6480d4\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"summary = df.describe().T\\n\",\"summary[\\\"snr\\\"] = (summary[\\\"mean\\\"].abs() / summary[\\\"std\\\"]).round(3)\\n\",\"summary[\\\"range\\\"] = (summary[\\\"max\\\"] - summary[\\\"min\\\"]).round(3)\\n\",\"summary.round(3)\"]},{\"cell_type\":\"markdown\",\"id\":\"5da71bc6\",\"metadata\":{},\"source\":[\"## Raster: a rolling view\\n\",\"\\n\",\"`matplotlib` straight to PNG. The pane shows the pixel dimensions under it, so a 1×1\\n\",\"image is never mistaken for a cell that produced nothing.\"]},{\"cell_type\":\"code\",\"id\":\"1dde001e\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"import matplotlib\\n\",\"matplotlib.use(\\\"Agg\\\")\\n\",\"import matplotlib.pyplot as plt\\n\",\"\\n\",\"fig, ax = plt.subplots(figsize=(9, 3.4), dpi=130)\\n\",\"for name in df.columns:\\n\",\"    ax.plot(df.index, df[name].rolling(41, center=True).mean(), lw=1.6, label=name)\\n\",\"ax.plot(df.index, drift, \\\"k--\\\", lw=1.0, alpha=.6, label=\\\"shared drift\\\")\\n\",\"ax.set_xlabel(\\\"t\\\"); ax.set_ylabel(\\\"rolling mean (41)\\\")\\n\",\"ax.set_title(\\\"Smoothed signal per array\\\")\\n\",\"ax.legend(ncol=4, frameon=False, loc=\\\"upper center\\\")\\n\",\"ax.grid(alpha=.25)\\n\",\"fig.tight_layout()\\n\",\"\\n\",\"buf = io.BytesIO(); fig.savefig(buf, format=\\\"png\\\"); plt.close(fig)\\n\",\"display(Image(data=buf.getvalue(), format=\\\"png\\\"))\"]},{\"cell_type\":\"markdown\",\"id\":\"399729ca\",\"metadata\":{},\"source\":[\"## Vector: the same idea, as SVG\\n\",\"\\n\",\"`image/svg+xml` used to be **selected first and then erased** — the sanitiser dropped\\n\",\"`<svg>` with its whole subtree, so the output rendered as nothing. It now arrives as a\\n\",\"`data:` URI inside an `<img>`, which draws *and* cannot execute.\"]},{\"cell_type\":\"code\",\"id\":\"d71a2dc4\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"fig, ax = plt.subplots(figsize=(8, 2.8))\\n\",\"dist = [df[c].values for c in df.columns]\\n\",\"parts = ax.violinplot(dist, showmeans=True, widths=.85)\\n\",\"for pc in parts[\\\"bodies\\\"]:\\n\",\"    pc.set_alpha(.55)\\n\",\"ax.set_xticks([1, 2, 3], list(df.columns))\\n\",\"ax.set_ylabel(\\\"amplitude\\\"); ax.set_title(\\\"Distribution per array\\\")\\n\",\"ax.grid(axis=\\\"y\\\", alpha=.25)\\n\",\"fig.tight_layout()\\n\",\"\\n\",\"buf = io.StringIO(); fig.savefig(buf, format=\\\"svg\\\"); plt.close(fig)\\n\",\"display(SVG(buf.getvalue()))\"]},{\"cell_type\":\"markdown\",\"id\":\"a1541194\",\"metadata\":{},\"source\":[\"## Interactive\\n\",\"\\n\",\"This one is **live**. It is drawn by `plotly.js`, loaded out of the Python package you\\n\",\"already have installed and served on loopback — the renderer never touches the store.\\n\",\"Hover it, drag to zoom, double-click to reset.\"]},{\"cell_type\":\"code\",\"id\":\"d70bcc2d\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"import plotly.graph_objects as go\\n\",\"\\n\",\"step = 8\\n\",\"fig = go.Figure()\\n\",\"for name, colour in zip(df.columns, [\\\"#3b6ea5\\\", \\\"#c25a3c\\\", \\\"#3f8f68\\\"]):\\n\",\"    fig.add_trace(go.Scatter(x=df.index[::step], y=df[name].values[::step],\\n\",\"                             mode=\\\"lines\\\", name=name, line=dict(width=1.4, color=colour)))\\n\",\"fig.add_trace(go.Scatter(x=df.index[::step], y=drift[::step], mode=\\\"lines\\\",\\n\",\"                         name=\\\"drift\\\", line=dict(width=2, dash=\\\"dash\\\", color=\\\"#555\\\")))\\n\",\"fig.update_layout(title=\\\"Raw signal (interactive)\\\", width=780, height=380,\\n\",\"                  hovermode=\\\"x unified\\\", margin=dict(l=50, r=20, t=50, b=40),\\n\",\"                  legend=dict(orientation=\\\"h\\\", y=1.12))\\n\",\"fig\"]},{\"cell_type\":\"code\",\"id\":\"5be9d8f5\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"corr = df.corr()\\n\",\"fig = go.Figure(go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns,\\n\",\"                           colorscale=\\\"RdBu\\\", zmid=0, text=corr.round(3).values,\\n\",\"                           texttemplate=\\\"%{text}\\\", showscale=True))\\n\",\"fig.update_layout(title=\\\"Cross-correlation\\\", width=430, height=360,\\n\",\"                  margin=dict(l=60, r=20, t=50, b=40))\\n\",\"fig\"]},{\"cell_type\":\"markdown\",\"id\":\"269c8dd4\",\"metadata\":{},\"source\":[\"## Streamed output\"]},{\"cell_type\":\"code\",\"id\":\"4482b4a0\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"for i in range(1, 6):\\n\",\"    print(f\\\"  pass {i}/5  rms={np.sqrt((df.iloc[:, i % 3] ** 2).mean()):.4f}\\\", flush=True)\\n\",\"    time.sleep(0.25)\\n\",\"print(\\\"done\\\")\"]},{\"cell_type\":\"markdown\",\"id\":\"4bfc0d7b\",\"metadata\":{},\"source\":[\"## ANSI, JSON and Markdown as outputs\"]},{\"cell_type\":\"code\",\"id\":\"f7493655\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"GREEN, YELLOW, RED, DIM, OFF = \\\"\\\\033[32m\\\", \\\"\\\\033[33m\\\", \\\"\\\\033[31m\\\", \\\"\\\\033[2m\\\", \\\"\\\\033[0m\\\"\\n\",\"for name in df.columns:\\n\",\"    snr = abs(df[name].mean()) / df[name].std()\\n\",\"    tag = f\\\"{GREEN}OK  {OFF}\\\" if snr > .05 else f\\\"{YELLOW}WARN{OFF}\\\"\\n\",\"    print(f\\\"{tag} {name:<6} snr={snr:6.4f} {DIM}n={len(df)}{OFF}\\\")\\n\",\"print(f\\\"{RED}FAIL{OFF} calibration  {DIM}(synthetic, for the demo){OFF}\\\")\"]},{\"cell_type\":\"code\",\"id\":\"3adccb4b\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"display(JSON({\\\"arrays\\\": list(df.columns),\\n\",\"              \\\"samples\\\": int(len(df)),\\n\",\"              \\\"window\\\": {\\\"start\\\": float(df.index[0]), \\\"end\\\": float(df.index[-1])},\\n\",\"              \\\"correlation\\\": {c: {k: round(float(v), 4) for k, v in df.corr()[c].items()} for c in df.columns}}))\"]},{\"cell_type\":\"code\",\"id\":\"674b25a4\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"best = summary[\\\"snr\\\"].idxmax()\\n\",\"display(Markdown(f\\\"\\\"\\\"\\n\",\"### Result\\n\",\"\\n\",\"The **{best}** array has the highest signal-to-noise ratio at `{summary.loc[best, 'snr']}`.\\n\",\"\\n\",\"| array | std | range |\\n\",\"|---|---|---|\\n\",\"\\\"\\\"\\\" + \\\"\\\\n\\\".join(f\\\"| {i} | {r['std']:.3f} | {r['range']:.3f} |\\\" for i, r in summary.iterrows())))\"]},{\"cell_type\":\"markdown\",\"id\":\"3091b458\",\"metadata\":{},\"source\":[\"## A traceback\\n\",\"\\n\",\"Errors render with their real stack and ANSI colouring intact.\"]},{\"cell_type\":\"code\",\"id\":\"29889936\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"def calibrate(frame, reference):\\n\",\"    return frame / reference\\n\",\"\\n\",\"calibrate(df, reference=None)\"]},{\"cell_type\":\"markdown\",\"id\":\"39819d46\",\"metadata\":{},\"source\":[\"## Two honest limits\\n\",\"\\n\",\"Not everything is renderable, and the pane says so rather than showing a blank space.\"]},{\"cell_type\":\"code\",\"id\":\"ce3aa3f9\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"# text/latex has no entry on the mime ladder, so this falls back to the repr.\\n\",\"display(Math(r\\\"\\\\mathrm{SNR} = \\\\frac{|\\\\mu|}{\\\\sigma}\\\"))\"]},{\"cell_type\":\"code\",\"id\":\"b1e5dbde\",\"metadata\":{},\"execution_count\":null,\"outputs\":[],\"source\":[\"# A vendor mime with no renderer installed is NAMED, not silently dropped.\\n\",\"display({\\\"application/vnd.acme-plot.v1+json\\\": {\\\"kind\\\": \\\"sunburst\\\", \\\"nodes\\\": 12}}, raw=True)\"]},{\"cell_type\":\"markdown\",\"id\":\"389a36a5\",\"metadata\":{},\"source\":[\"---\\n\",\"\\n\",\"That is the whole surface: tables, raster, vector, interactive, streams, colour,\\n\",\"structured output, rendered Markdown, tracebacks — and two failures that tell you what\\n\",\"went wrong instead of rendering nothing.\"]}],\"metadata\":{\"kernelspec\":{\"display_name\":\"Python 3\",\"language\":\"python\",\"name\":\"python3\"},\"language_info\":{\"name\":\"python\"}},\"nbformat\":4,\"nbformat_minor\":5}";
+const DEMO_FILENAME = 'wc-jupyter-demo.ipynb';
+
+const ASSET_MAX_BYTES = 32 * 1024 * 1024;
+const ASSET_TYPES = { '.js': 'application/javascript; charset=utf-8', '.json': 'application/json' };
+
+// One loopback server per service process. It serves an ALLOWLIST and nothing
+// else: a file is reachable only after this service resolved it from the kernel
+// and registered it, and only under a random id. It binds 127.0.0.1 so it is not
+// on the network, and it answers nothing but GET/HEAD on /a/<id>.
+const assets = {
+  server: null,
+  port: 0,
+  byId: new Map(),      // id -> { file, type, bytes }
+  byFile: new Map(),    // abs path -> id (so re-resolving is free and stable)
+
+  async start(log) {
+    if (this.server) return this.port;
+    const srv = http.createServer((req, res) => {
+      const deny = (code) => { res.statusCode = code; res.end(); };
+      if (req.method !== 'GET' && req.method !== 'HEAD') return deny(405);
+      const m = /^\/a\/([A-Za-z0-9_-]{16,64})(?:\.[a-z]+)?$/.exec((req.url || '').split('?')[0]);
+      if (!m) return deny(404);
+      const rec = this.byId.get(m[1]);
+      if (!rec) return deny(404);
+      let body;
+      try { body = fs.readFileSync(rec.file); } catch { return deny(410); }
+      res.setHeader('content-type', rec.type);
+      res.setHeader('content-length', String(body.length));
+      // The box is a null origin. A classic <script src> needs no CORS, and
+      // deliberately NOT sending one keeps fetch()/import() unable to read these
+      // bytes from anywhere else in the browser.
+      res.setHeader('x-content-type-options', 'nosniff');
+      res.setHeader('cache-control', 'public, max-age=86400, immutable');
+      res.statusCode = 200;
+      if (req.method === 'HEAD') return res.end();
+      res.end(body);
+    });
+    srv.on('error', (e) => { log && log('asset server: ' + e.message); });
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    if (srv.unref) srv.unref();
+    this.server = srv;
+    this.port = srv.address().port;
+    log && log('asset server on 127.0.0.1:' + this.port);
+    return this.port;
+  },
+
+  // Register a file and get back the URL the box should load. Absolute path
+  // only, size-capped, and the extension decides the content type — an asset
+  // whose type we cannot name is refused rather than served as octet-stream.
+  publish(file) {
+    if (!this.server || !file) return null;
+    const ext = (String(file).match(/\.[a-z]+$/) || [''])[0];
+    const type = ASSET_TYPES[ext];
+    if (!type) return null;
+    const known = this.byFile.get(file);
+    if (known) return this.urlFor(known);
+    let st;
+    try { st = fs.statSync(file); } catch { return null; }
+    if (!st.isFile() || st.size > ASSET_MAX_BYTES) return null;
+    const id = crypto.randomBytes(18).toString('base64url');
+    this.byId.set(id, { file, type, bytes: st.size });
+    this.byFile.set(file, id);
+    return this.urlFor(id);
+  },
+
+  urlFor(id) {
+    const rec = this.byId.get(id);
+    return rec ? { url: 'http://127.0.0.1:' + this.port + '/a/' + id + '.js', bytes: rec.bytes } : null;
+  },
+
+  stop() {
+    if (this.server) { try { this.server.close(); } catch {} }
+    this.server = null; this.port = 0;
+    this.byId.clear(); this.byFile.clear();
+  },
+};
 
 let stream = null;
 let pollTimer = null;
@@ -181,12 +326,51 @@ function shapeMime(data, metadata) {
   if (data['application/javascript']) inert.push('application/javascript');
   for (const k of Object.keys(data)) if (k.startsWith('application/vnd.jupyter.widget')) inert.push(k);
 
+  // A vendor payload first: it is the richest thing in the bundle and the only
+  // one the ladder has no entry for. The spec is cheap — a 200-point plotly
+  // figure is ~1.3 KB — so it travels through the store and the RENDERER does
+  // not. A text/plain sibling rides along so the pane can degrade to it when the
+  // renderer is unavailable, which is the difference between a repr and nothing.
+  for (const [kind, spec] of Object.entries(RENDERERS)) {
+    for (const key of Object.keys(data)) {
+      const m = spec.mime.exec(key);
+      if (!m) continue;
+      let json = '';
+      try { json = JSON.stringify(data[key]); } catch { continue; }
+      if (!json || json.length > MAX_SPEC_BYTES) {
+        return { kind: 'too-big', mime: key, bytes: json.length, inert };
+      }
+      return {
+        kind: 'vendor', renderer: kind, mime: key,
+        specVersion: Number(m[m.length - 1]) || null,
+        spec: data[key],
+        plain: joinSource(data['text/plain'] || ''),
+        bytes: json.length, inert,
+      };
+    }
+  }
+
+  // THE LADDER, and it FALLS THROUGH. It used to take the first key present and
+  // return whatever that produced — so an image/svg+xml, which sits first, was
+  // chosen and then erased by the sanitiser, and the PNG sitting right behind it
+  // in the same bundle was never considered. A candidate that renders to nothing
+  // is now skipped.
   for (const mime of MIME_LADDER) {
     const v = data[mime];
     if (v == null) continue;
     if (mime === 'image/svg+xml') {
+      // NOT inlined. An <svg> in the document is a script surface, which is why
+      // the sanitiser dropped it whole and the output rendered as nothing. As a
+      // data: URI inside an <img> it draws, and scripts inside an SVG loaded
+      // that way do not run — the same choice nbconvert makes.
       const c = clip(joinSource(v), MAX_OUT_BYTES);
-      return { kind: 'svg', svg: sanitizeHtml(c.text), clipped: c.clipped, inert };
+      const svg = c.text.trim();
+      if (!svg) continue;
+      return {
+        kind: 'image', mime: 'image/svg+xml',
+        b64: Buffer.from(svg, 'utf8').toString('base64'),
+        bytes: Buffer.byteLength(svg, 'utf8'), clipped: c.clipped, inert,
+      };
     }
     if (mime === 'image/png' || mime === 'image/jpeg' || mime === 'image/gif') {
       const b64 = String(Array.isArray(v) ? v.join('') : v).replace(/\s+/g, '');
@@ -195,7 +379,13 @@ function shapeMime(data, metadata) {
     }
     if (mime === 'text/html') {
       const c = clip(joinSource(v), MAX_OUT_BYTES);
-      return { kind: 'html', html: sanitizeHtml(c.text), plain: joinSource(data['text/plain'] || ''), clipped: c.clipped, inert };
+      const html = sanitizeHtml(c.text);
+      // Everything the notebook authored can be dropped — a bare <script>, a
+      // <style>, a plotly div whose content is all JS. That used to render as a
+      // blank box. Fall through instead, to the text/plain the shaper was
+      // already computing for exactly this case.
+      if (!html.replace(/<[^>]*>/g, '').trim() && !/<(img|table|hr|br)\b/i.test(html)) continue;
+      return { kind: 'html', html, plain: joinSource(data['text/plain'] || ''), clipped: c.clipped, inert };
     }
     if (mime === 'text/markdown') {
       const c = clip(joinSource(v), MAX_OUT_BYTES);
@@ -210,7 +400,11 @@ function shapeMime(data, metadata) {
     const c = clip(joinSource(v), MAX_STREAM_CHARS);
     return { kind: 'text', text: c.text, clipped: c.clipped, inert };
   }
-  return null;
+  // Nothing on the ladder and no vendor match. Returning null here DROPPED the
+  // output with no trace, live and from file. Name what arrived instead.
+  const keys = Object.keys(data);
+  if (!keys.length) return null;
+  return { kind: 'unrenderable', mimes: keys.slice(0, 8), inert };
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +810,7 @@ module.exports = {
     // nowhere in the fingerprint, so one `jupyter lab ~` would silently widen
     // the boundary to $HOME while the approval still read notebooks=[...].
     // Same shape as the file-editor builtin, whose default is likewise cwd.
+    const rendererParam = !!(ctx.params && ctx.params.renderers);
     const openDisabled = (ctx.params && ctx.params.open_root) === false;
     const openRoot = openDisabled ? null
       : (ctx.params && typeof ctx.params.open_root === 'string' && ctx.params.open_root
@@ -831,6 +1026,9 @@ module.exports = {
         conn.ok = true; conn.state = 'connected'; conn.hint = null;
         await deriveSaveability(pick);
         pushNb();
+        // After the socket, because discovery asks the KERNEL where its packages
+        // keep their JavaScript. Never blocks connecting.
+        discoverRenderers().catch((e) => ctx.log('renderer discovery: ' + e.message));
       } catch (e) {
         conn.ok = false; conn.state = 'error'; conn.error = String((e && e.message) || e);
       }
@@ -904,15 +1102,82 @@ module.exports = {
         pushConn(); return;
       }
       const attempt = ++reconnects;
+      settling = true;
       setTimeout(async () => {
-        if (stopped || ws) return;
+        if (stopped || ws) { settling = false; return; }
         try {
           await openSocket();
+          // Channel up is not kernel up, here for the same reason as a restart.
+          await waitKernelReady(8000);
           conn.ok = true; conn.state = 'connected'; conn.error = null; conn.hint = null;
           reconnects = 0;
+          settling = false;
           pushConn();
-        } catch { reconnectSoon(); }
+          runNext();            // drain what was held while the socket was gone
+        } catch {
+          settling = false;
+          reconnectSoon();
+        }
       }, 300 * attempt).unref?.();
+    };
+
+    // Ask the kernel a question and read the answer off stdout.
+    //
+    // Deliberately NOT routed through execute(): this must not take a slot in the
+    // run queue, must not advance an execution count, must not touch a cell's
+    // outputs and must not be journalled. store_history is off for the same
+    // reason. It is how the service learns what the user has installed and where
+    // that package keeps its JavaScript.
+    const evals = new Map();   // msg_id -> { chunks, resolve, timer }
+    const kernelEval = (code, ms) => new Promise((resolve) => {
+      if (!ws || !conn.ok) return resolve(null);
+      const m = msg('execute_request', {
+        code, silent: false, store_history: false, allow_stdin: false, stop_on_error: true,
+      }, session);
+      const rec = { chunks: [], resolve, timer: null };
+      rec.timer = setTimeout(() => { evals.delete(m.id); resolve(null); }, ms || 15000);
+      if (rec.timer.unref) rec.timer.unref();
+      evals.set(m.id, rec);
+      try { ws.send(m.frame); } catch { clearTimeout(rec.timer); evals.delete(m.id); resolve(null); }
+    });
+
+    // The answer comes back as one sentinel-prefixed JSON line, so ordinary
+    // prints or warnings from a user's sitecustomize cannot be mistaken for it.
+    const EVAL_TAG = '__JPY_EVAL__ ';
+    const kernelJson = async (body, ms) => {
+      const out = await kernelEval(
+        'import json as _j\ntry:\n' + body.split('\n').map((l) => '    ' + l).join('\n') +
+        '\nexcept Exception as _e:\n    _r = {"error": type(_e).__name__ + ": " + str(_e)}\n' +
+        'print("' + EVAL_TAG + '" + _j.dumps(_r))', ms);
+      if (!out) return null;
+      const line = out.split('\n').find((l) => l.startsWith(EVAL_TAG));
+      if (!line) return null;
+      try { return JSON.parse(line.slice(EVAL_TAG.length)); } catch { return null; }
+    };
+
+    // What the pane needs in order to draw a vendor payload: a version and a URL
+    // it can <script src>. Only the URL travels — never the bytes.
+    let renderers = {};
+    const pushRenderers = () => push({ jpy_render: { seq: ++seq, enabled: !!rendererParam, renderers } });
+
+    const discoverRenderers = async () => {
+      if (!rendererParam || !ws || !conn.ok) return;
+      await assets.start(ctx.log);
+      const found = {};
+      for (const [kind, spec] of Object.entries(RENDERERS)) {
+        const r = await kernelJson(spec.probe, 20000);
+        if (!r || r.error || !r.path) {
+          found[kind] = { available: false, why: (r && r.error) || 'not installed in this kernel' };
+          continue;
+        }
+        const pub = assets.publish(r.path);
+        found[kind] = pub
+          ? { available: true, version: r.version || null, url: pub.url, bytes: pub.bytes, global: spec.global }
+          : { available: false, why: 'could not serve ' + r.path };
+      }
+      renderers = found;
+      pushRenderers();
+      ctx.log('renderers: ' + Object.entries(found).map(([k, v]) => k + '=' + (v.available ? v.version : 'no')).join(' '));
     };
 
     // --- execution ---------------------------------------------------------
@@ -1004,6 +1269,17 @@ module.exports = {
 
     function onIopub(m) {
       const parent = m && m.parent_header && m.parent_header.msg_id;
+      const ev = parent && evals.get(parent);
+      if (ev && m.channel === 'iopub') {
+        if (m.msg_type === 'stream' && m.content && m.content.name === 'stdout') {
+          ev.chunks.push(joinSource(m.content.text));
+        } else if (m.msg_type === 'error') {
+          ev.chunks.push('');
+        } else if (m.msg_type === 'status' && m.content && m.content.execution_state === 'idle') {
+          clearTimeout(ev.timer); evals.delete(parent); ev.resolve(ev.chunks.join(''));
+        }
+        return;
+      }
       const rec = parent && pending.get(parent);
       // A kernel-lifecycle status belongs to NO cell: it arrives with an empty
       // parent_header, so it has to be read before the per-cell guard below,
@@ -1619,6 +1895,32 @@ module.exports = {
           break;
         }
         case 'open': await openPath(c.path); break;
+        case 'demo': {
+          // Write the bundled demo notebook and open it. Like 'new' it CREATES A
+          // FILE, so it is not replay-safe and is absent from VIEW_OPS — a
+          // resurrected create would drop a notebook on every graph jump.
+          //
+          // Overwriting is allowed here, unlike 'new': the demo is ours and
+          // re-running it should give the pristine notebook back rather than
+          // refusing because last time's copy is still there.
+          if (openDisabled) { refuse('demo', 'open-disabled'); break; }
+          if (!server || !conn.ok) { refuse('demo', 'no-server'); break; }
+          const dAbs = fenced(c.dir == null ? openRoot : c.dir);
+          if (!dAbs) { refuse('demo', 'outside-boundary'); break; }
+          const dC = contentsDirFor(server, dAbs);
+          if (dC == null) { refuse('demo', 'outside-server-root'); break; }
+          const dTarget = (dC ? dC + '/' : '') + DEMO_FILENAME;
+          const denc = (p2) => p2.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+          try {
+            const put = await fetch(server.url + 'api/contents/' + denc(dTarget), {
+              method: 'PUT', headers: { ...authHeaders(server.token), 'Content-Type': 'application/json' },
+              body: JSON.stringify({ type: 'notebook', format: 'json', content: JSON.parse(DEMO_NOTEBOOK) }) });
+            if (!put.ok) { refuse('demo', 'http-' + put.status); break; }
+            await openPath(path.join(dAbs, DEMO_FILENAME));
+            push({ jpy_demo: { seq: ++seq, state: 'ready', path: path.join(dAbs, DEMO_FILENAME), needs: ['numpy', 'pandas', 'matplotlib', 'plotly'] } });
+          } catch (e) { refuse('demo', String((e && e.message) || e)); }
+          break;
+        }
         case 'new': {
           // NOT replay-safe: it CREATES A FILE, and a resurrected create would
           // spray notebooks into the user's directory on every node jump.
@@ -1801,6 +2103,46 @@ module.exports = {
           if (!running) runNext();
           break;
         }
+        case 'install': {
+          // Install a renderer into the LIVE kernel and pick it up without
+          // anything restarting — measured: %pip completes over the normal
+          // protocol and an import works in the same session.
+          //
+          // Note what this design does NOT have to care about: the kernel's
+          // sys.prefix differing from the SERVER's. That mismatch breaks anyone
+          // fetching assets over /lab/extensions, because the server searches
+          // its own prefix. We ask the KERNEL where its package is and read that
+          // file, so the server's environment never enters into it.
+          if (!rendererParam) { refuse('install', 'renderers-disabled'); break; }
+          const pkg = String((c && c.package) || '').trim();
+          // This string is interpolated into code the kernel executes, so it is
+          // an allowlist, not an escape: a distribution name with an optional
+          // extras group and nothing else.
+          if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,80})(?:\[[A-Za-z0-9,._-]{1,40}\])?$/.test(pkg)) {
+            push({ jpy_install: { seq: ++seq, package: pkg.slice(0, 40), state: 'refused', detail: 'not a plain package name' } });
+            break;
+          }
+          if (!ws || !conn.ok) { push({ jpy_install: { seq: ++seq, package: pkg, state: 'refused', detail: 'no kernel' } }); break; }
+          push({ jpy_install: { seq: ++seq, package: pkg, state: 'installing', detail: null } });
+          const log = await kernelEval('%pip install --quiet ' + pkg, 300000);
+          // pip writes progress to stderr with ANSI and carriage returns; the
+          // tail is the only part worth keeping and the store is not a console.
+          const tail = String(log || '').replace(/\r/g, '\n').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 300);
+          await discoverRenderers();
+          const got = Object.entries(renderers).find(([, v]) => v && v.available);
+          push({ jpy_install: {
+            seq: ++seq, package: pkg,
+            state: got ? 'installed' : 'unavailable',
+            detail: got ? null : (tail || 'installed, but no renderer JS was found in it'),
+          } });
+          break;
+        }
+        case 'renderers': {
+          // Re-probe on demand, e.g. after the user installed something outside
+          // this pane.
+          await discoverRenderers();
+          break;
+        }
         case 'interrupt': queue.length = 0; await control('interrupt'); break;
         case 'restart': await control('restart'); break;
         default: break;
@@ -1852,6 +2194,7 @@ module.exports = {
     // unsealed typing burst is precisely what autosave would otherwise lose.
     try { if (typeof flushAll === 'function') await flushAll(); } catch {}
     stopped = true;
+    assets.stop();
     if (stream) { try { stream.close(); } catch {} stream = null; }
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     if (ws) { try { ws.close(); } catch {} ws = null; }

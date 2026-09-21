@@ -62,6 +62,11 @@ function mkEl(tag) {
   };
   return el;
 }
+// An <iframe> gets a stand-in contentWindow so the pane's `e.source !== f.contentWindow`
+// guard — the thing that stops another frame spoofing a render result — is a real
+// check in tests rather than two undefineds comparing equal.
+function mkFrame() { const f = mkEl('iframe'); f.contentWindow = { __frame: true }; return f; }
+
 function mkText(t) { const n = mkEl('#text'); n._text = t; return n; }
 
 function makeRoot() {
@@ -81,11 +86,24 @@ function makeRoot() {
 
 function install() {
   global.document = {
-    createElement: (t) => mkEl(t),
+    createElement: (t) => (String(t).toLowerCase() === 'iframe' ? mkFrame() : mkEl(t)),
     createTextNode: (t) => mkText(t),
     getElementById: () => null,
     querySelector: () => null,
   };
+  // The pane listens on `window` for postMessage from its JS boxes — a real
+  // window event, not a shadow-root one, because the frame posts to `parent`.
+  // Modelled so the box's hand-back can be driven in a test.
+  const winListeners = {};
+  global.window = {
+    addEventListener(t, fn) { (winListeners[t] = winListeners[t] || []).push(fn); },
+    removeEventListener(t, fn) { const a = winListeners[t] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+    __post(source, data) {
+      for (const fn of (winListeners.message || []).slice()) fn({ source, data, preventDefault() {} });
+    },
+    __listeners: winListeners,
+  };
+
   // Frames are DEFERRED, the way a browser defers them: a callback queued
   // DURING a render runs after that render has finished mutating the DOM.
   // Running them inline hid a whole class of bug — a textarea that auto-sized
@@ -96,4 +114,4 @@ function install() {
   global.__flushFrames = () => { for (const fn of frames.splice(0)) { try { fn(); } catch {} } };
   if (!global.setTimeout.__patched) { /* real timers are fine */ }
 }
-module.exports = { mkEl, mkText, makeRoot, install };
+module.exports = { mkEl, mkText, mkFrame, makeRoot, install };

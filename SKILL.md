@@ -313,6 +313,29 @@ The textarea auto-sizes to its content, and a measurement taken while the contai
 and `renderCells` re-measures on the transition out of hidden. Without both halves you get a
 0px-tall textarea holding exactly the right text: focusable, typable, invisible.
 
+## The bundled demo
+
+`jpy-notebook` carries a 25-cell demo notebook **inside `service.js`** — a pack installs
+components, themes and one `SKILL.md` and has no mechanism for a data file, so that is the
+only way it can ship. `demo/signal-quality.ipynb` in the repo is the readable copy, and
+`test/demo-harness.mjs` asserts the two are byte-identical so they cannot drift.
+
+```js
+set_store({ jpy_ctl: { seq: Date.now(), op: 'demo' } })
+```
+
+writes it into `open_root` as `wc-jupyter-demo.ipynb` and opens it as a tab. It answers on
+`jpy_demo` with `{ state, path, needs }`, where `needs` is the Python packages it imports
+(`numpy`, `pandas`, `matplotlib`, `plotly`). Re-running it overwrites rather than refusing —
+unlike `new`, the file is ours and a second run should give the pristine notebook back.
+
+It exercises every output kind in one pass: pandas tables, matplotlib as PNG **and** SVG, two
+interactive plotly figures, streamed output, ANSI colour, `JSON` and rendered `Markdown`
+(including a table), a traceback, and two deliberate failures — `Math(...)` falling back to
+its repr because `text/latex` is not on the ladder, and a fake vendor mime that is *named*
+rather than dropped. That makes it the pack's broadest regression test as well as a demo: it
+is how the reconnect-window bug was found, because no headless harness has a browser attached.
+
 ## Known gaps
 
 - **Restoring a deleted cell does not restore its outputs.** The source comes back; the output

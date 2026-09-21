@@ -30,7 +30,7 @@ w('struct44.ipynb', { cells: [
   { cell_type:'markdown', metadata:{}, source:'# legacy md' },
 ], metadata:{ kernelspec:{ name:'python3', language:'python' } }, nbformat:4, nbformat_minor:4 });
 
-const suites = ['pane-test.cjs', 'save-harness.mjs', 'trunc-harness.mjs', 'struct-harness.mjs', 'journal-harness.mjs', 'cellundo-harness.mjs', 'tabs-harness.mjs', 'kernel-harness.mjs', 'exec-harness.mjs', 'format-harness.mjs', 'death-harness.mjs'];
+const suites = ['pane-test.cjs', 'save-harness.mjs', 'trunc-harness.mjs', 'struct-harness.mjs', 'journal-harness.mjs', 'cellundo-harness.mjs', 'tabs-harness.mjs', 'kernel-harness.mjs', 'exec-harness.mjs', 'format-harness.mjs', 'death-harness.mjs', 'renderer-harness.mjs', 'demo-harness.mjs'];
 let bad = 0;
 for (const s of suites) {
   let out = '';

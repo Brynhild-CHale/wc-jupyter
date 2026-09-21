@@ -440,5 +440,120 @@ twoB('ua');
 store.push({ jpy_src_p0: { source: 'p()', truncated: false } });
 ok('...and coming back to P its output is still there', outText().includes('P OUT'), outText());
 
+
+// A vendor payload is a spec plus a renderer that lives outside this pane. The
+// box is where it runs: an opaque-origin iframe, reached only by postMessage.
+console.log('\n— the JS box —');
+const VSPEC = { data: [{ x: [1, 2], y: [3, 4], type: 'scatter' }], layout: { title: 'p', width: 300, height: 200 } };
+const vendorOut = (extra) => ({ seq: 80, state: 'ok', outputs: [Object.assign({
+  kind: 'vendor', renderer: 'plotly', mime: 'application/vnd.plotly.v1+json',
+  spec: VSPEC, plain: 'Figure({...})', bytes: 120 }, extra || {})] });
+store.push({ jpy_src_v1: { source: 'fig', truncated: false } });
+only(80, [{ id: 'v1', type: 'code', head: 'fig', len: 3, truncated: false, exec_count: 1 }]);
+store.push({ jpy_src_v1: { source: 'fig', truncated: false } });
+
+const outRowOf = () => host.children.filter(n => n.className === 'cell' && !n.hidden)
+  .map(n => (n.children || []).find(c => !c.className))
+  .filter(Boolean).pop();
+const deep = (n, pred) => { const hit = []; const walk = (x) => { if (pred(x)) hit.push(x); (x.children || []).forEach(walk); }; walk(n); return hit; };
+
+// 1. no renderer available -> degrade, do NOT go blank
+store.push({ jpy_render: { seq: 1, enabled: true, renderers: { plotly: { available: false, why: 'not installed in this kernel' } } } });
+store.push({ jpy_out_v1: vendorOut() });
+let col = outRowOf();
+ok('with no renderer it shows the repr', deep(col, x => x.tagName === 'PRE').some(p => p.textContent.includes('Figure')), col && col.textContent.slice(0, 60));
+ok('...and says which renderer is missing', deep(col, x => x.className === 'badge').some(b => /plotly/.test(b.textContent) && /not installed/.test(b.textContent)),
+  deep(col, x => x.className === 'badge').map(b => b.textContent).join('|'));
+ok('...and builds no iframe', deep(col, x => x.tagName === 'IFRAME').length === 0);
+
+// 2. renderer available -> the box
+store.push({ jpy_render: { seq: 2, enabled: true, renderers: { plotly: { available: true, version: '7.1.0', global: 'Plotly', url: 'http://127.0.0.1:5555/a/abc.js', bytes: 4815814 } } } });
+store.push({ jpy_out_v1: Object.assign(vendorOut(), { seq: 81 }) });
+col = outRowOf();
+const frames = deep(col, x => x.tagName === 'IFRAME');
+ok('a box is built', frames.length === 1, frames.length);
+const f = frames[0];
+ok('sandboxed to scripts only', f.attrs.sandbox === 'allow-scripts', f.attrs.sandbox);
+ok('...WITHOUT allow-same-origin, which is what makes the origin opaque', !/allow-same-origin/.test(f.attrs.sandbox || ''), f.attrs.sandbox);
+ok('the renderer is loaded by <script src>, not fetch', /s\.src = "http:\/\/127\.0\.0\.1:5555\/a\/abc\.js"/.test(f.srcdoc), (f.srcdoc || '').slice(0, 0) || 'srcdoc');
+ok('...and the spec is inlined, not fetched', f.srcdoc.includes('"scatter"'));
+ok('the box is sized from the payload layout', /max-width:300px/.test(f.style.cssText) && /height:200px/.test(f.style.cssText), f.style.cssText);
+ok('it is excluded from form_state', 'data-no-persist' in f.attrs);
+
+// 3. a still from a previous render shows even before the frame reports
+store.push({ jpy_cap_v1: { seq: 3, png: 'data:image/png;base64,AAAA' } });
+store.push({ jpy_out_v1: Object.assign(vendorOut(), { seq: 82 }) });
+col = outRowOf();
+ok('a captured still is rendered as an <img>', deep(col, x => x.tagName === 'IMG').some(i => String(i.src).startsWith('data:image/png')),
+  deep(col, x => x.tagName === 'IMG').map(i => String(i.src).slice(0, 24)).join(','));
+console.log('       (that still is what a graph thumbnail and an export show —');
+console.log('        a preview CSP blocks frames outright, so without it: a hole)');
+
+// 3b. the hand-back: the box reports, the pane keeps the still
+store.push({ jpy_out_v1: Object.assign(vendorOut(), { seq: 84 }) });
+col = outRowOf();
+const box = deep(col, x => x.tagName === 'IFRAME')[0];
+const PNG = 'data:image/png;base64,' + 'Q'.repeat(200);
+const capBefore = store._sent.length;
+global.window.__post({ __frame: 'someone else' }, JSON.stringify({ __jpy: 1, ok: true, png: PNG }));
+ok('a message from a DIFFERENT frame is ignored', store._sent.length === capBefore, store._sent.length - capBefore);
+global.window.__post(box.contentWindow, JSON.stringify({ __jpy: 1, ok: true, png: PNG }));
+const capWrite = store._sent[store._sent.length - 1];
+ok('its own frame writes the still to the store', capWrite && capWrite.jpy_cap_v1 && capWrite.jpy_cap_v1.png === PNG,
+  capWrite && Object.keys(capWrite).join(','));
+const n2 = store._sent.length;
+global.window.__post(box.contentWindow, JSON.stringify({ __jpy: 1, ok: true, png: PNG }));
+ok('...and does not rewrite an identical still', store._sent.length === n2, store._sent.length - n2);
+console.log('       (the store holds the PICTURE, never the renderer — plotly.min.js is');
+console.log('        4.59 MiB and one get_store of that is ~1.2M tokens)');
+
+// 4. an output with no ladder key and no vendor match names itself
+store.push({ jpy_out_v1: { seq: 83, state: 'ok', outputs: [{ kind: 'unrenderable', mimes: ['application/vnd.whatever.v1+json'] }] } });
+col = outRowOf();
+ok('an unknown bundle is named, not dropped', deep(col, x => x.className === 'badge').some(b => /no renderer for/.test(b.textContent) && /whatever/.test(b.textContent)),
+  deep(col, x => x.className === 'badge').map(b => b.textContent).join('|'));
+
+
+// A markdown TABLE, in a cell and in a display() output. Without this the rows
+// fell through to the paragraph branch, which joins lines with a space — so a
+// table arrived as one run-on line of pipes.
+console.log('\n— markdown tables —');
+const TBL = ['### Result', '', 'The **ridge** array wins.', '',
+  '| array | std | range |', '|---|---:|:---:|', '| north | 0.787 | 3.465 |', '| ridge | 0.694 | 3.769 |', ''].join('\n');
+store.push({ jpy_src_t1: { source: TBL, truncated: false } });
+only(90, [{ id: 't1', type: 'markdown', head: '### Result', len: TBL.length, truncated: false, exec_count: null }]);
+store.push({ jpy_src_t1: { source: TBL, truncated: false } });
+const mdBox = () => (rowAt(0).children || []).find(ch => ch.className === 'md');
+const find = (n, pred) => { const hit = []; const walk = (x) => { if (pred(x)) hit.push(x); (x.children || []).forEach(walk); }; walk(n); return hit; };
+ok('the markdown cell rendered', mdBox() && mdBox().hidden === false, mdBox() && mdBox().hidden);
+const tbls = find(mdBox(), x => x.tagName === 'TABLE');
+ok('a real <table> was built', tbls.length === 1, tbls.length);
+ok('...with a header row', find(tbls[0], x => x.tagName === 'TH').map(t => t.textContent).join(',') === 'array,std,range',
+  find(tbls[0], x => x.tagName === 'TH').map(t => t.textContent).join(','));
+ok('...and two body rows', find(tbls[0], x => x.tagName === 'TR').length === 3, find(tbls[0], x => x.tagName === 'TR').length);
+ok('...with the cell values intact', find(tbls[0], x => x.tagName === 'TD').map(t => t.textContent).join(',') === 'north,0.787,3.465,ridge,0.694,3.769',
+  find(tbls[0], x => x.tagName === 'TD').map(t => t.textContent).join(','));
+ok('alignment from the delimiter row is honoured',
+  find(tbls[0], x => x.tagName === 'TH')[1].style.textAlign === 'right' && find(tbls[0], x => x.tagName === 'TH')[2].style.textAlign === 'center',
+  find(tbls[0], x => x.tagName === 'TH').map(t => t.style.textAlign || '-').join(','));
+ok('the prose above it is still a paragraph, not swallowed', find(mdBox(), x => x.tagName === 'P').some(p => p.textContent.includes('ridge')),
+  find(mdBox(), x => x.tagName === 'P').map(p => p.textContent).join('|'));
+ok('the heading survives', find(mdBox(), x => x.tagName === 'H3').length === 1);
+
+// the same renderer serves display(Markdown(...)) output
+store.push({ jpy_src_t2: { source: 'x', truncated: false } });
+only(91, [{ id: 't2', type: 'code', head: 'x', len: 1, truncated: false, exec_count: 1 }]);
+store.push({ jpy_out_t2: { seq: 1, state: 'ok', outputs: [{ kind: 'markdown', text: TBL }] } });
+const outCol = host.children.filter(n => n.className === 'cell' && !n.hidden).map(n => (n.children || []).find(c => !c.className)).filter(Boolean).pop();
+ok('a markdown OUTPUT gets a table too', find(outCol, x => x.tagName === 'TABLE').length === 1,
+  find(outCol, x => x.tagName === 'TABLE').length);
+
+// a paragraph that merely contains pipes must NOT become a table
+store.push({ jpy_src_t3: { source: 'use a | b to pipe\nand keep going', truncated: false } });
+only(92, [{ id: 't3', type: 'markdown', head: 'use a', len: 30, truncated: false, exec_count: null }]);
+store.push({ jpy_src_t3: { source: 'use a | b to pipe\nand keep going', truncated: false } });
+ok('pipes without a delimiter row stay prose', find(mdBox(), x => x.tagName === 'TABLE').length === 0,
+  find(mdBox(), x => x.tagName === 'TABLE').length);
+
 console.log('\n' + (fails ? fails + ' FAILING' : 'all green — textareas survive re-renders, so native undo survives with them'));
 process.exit(fails ? 1 : 0);

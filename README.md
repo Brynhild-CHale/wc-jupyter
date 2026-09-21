@@ -58,6 +58,56 @@ If nothing is running, the pane says so and offers **Rescan**.
   context whenever a pane is rebuilt. The kernel lives host-side instead, so a pane teardown
   costs a repaint rather than your session.
 
+## The demo
+
+```js
+use_component({ name: 'jpy-notebook', id: 'jpy-notebook-main',
+                params: { notebooks: [], open_root: '/tmp/scratch', renderers: true } })
+set_store({ jpy_ctl: { seq: Date.now(), op: 'demo' } })
+```
+
+writes a 25-cell signal-analysis notebook into `open_root`, opens it, and leaves you a
+`run-all` away from every output kind at once: pandas tables, matplotlib as PNG **and**
+SVG, two interactive plotly figures, streamed output, ANSI colour, `JSON` and rendered
+Markdown, a traceback, and two deliberate failures that show what the pane does when it
+*cannot* render something.
+
+It lives inside `service.js`, because a pack installs components, themes and one
+`SKILL.md` and has no mechanism for a data file. `demo/signal-quality.ipynb` is the
+readable copy; `test/demo-harness.mjs` asserts the two are byte-identical.
+`demo/jpy-demo.skill.md` is an optional project-local skill — drop it at
+`.claude/skills/jpy-demo/SKILL.md` for a `/jpy-demo` command. It is not installed by the
+pack, which ships exactly one skill and names it after itself.
+
+## Interactive output, in a sandbox
+
+A vendor mime — `application/vnd.plotly.v1+json` and friends — is a **spec** plus a
+renderer, and the two have wildly different costs. A 200-point plotly figure's spec is
+1.3 KB; `plotly.min.js` is 4.59 MiB. So the spec travels through the store and the renderer
+never does: the service reads it out of the Python package that emitted the payload (which
+makes it version-matched by construction), serves it on loopback under an unguessable id,
+and the pane loads it with a classic `<script src>` into an
+`<iframe sandbox="allow-scripts">`. No `allow-same-origin`, so the frame has an opaque
+origin and cannot reach the pane, the store, cookies or storage; the only channel back is
+`postMessage`. Measured: **243 bytes of manifest for 4,815,814 bytes of JavaScript.**
+
+The frame hands back a still image, which is what graph thumbnails and exports show — a
+preview's CSP blocks frames outright, so without it those surfaces would have a hole where
+the plot was.
+
+Turning this on is the `renderers` **param**, not a toggle: params are part of the consent
+key, so it re-asks for trust and the approval line says `renderers=true`. What it widens is
+real — the service reads JavaScript from outside `open_root`.
+
+```js
+set_store({ jpy_ctl: { seq: Date.now(), op: 'install', package: 'plotly' } })
+```
+
+installs a renderer into the **live kernel** and picks it up with nothing restarting — not
+the service, not the pane, not the Jupyter server. Measured at 8.9s for matplotlib.
+Renderers with no local JavaScript (vega: altair ships none) report `available: false` with
+a reason rather than guessing a version off a CDN.
+
 ## The kernel is acquired, not started
 
 Connecting does **not** POST `api/kernels`. It asks for the Jupyter **session** that owns the
@@ -112,8 +162,11 @@ wc-jupyter/
 ├─ web-chat-pack.json
 ├─ SKILL.md                      # the trigger sentence + the store contract
 ├─ README.md  LICENSE
+├─ demo/                         # the readable copy of the bundled notebook,
+│                                #   plus an optional /jpy-demo skill
 ├─ test-fixtures/sample.ipynb    # deliberately awkward: list-form source, an id-less cell
-├─ test/                         # ten suites + a DOM shim; see test/README.md
+├─ test/                         # thirteen suites + a DOM shim; see test/README.md
+│  └─ feasibility/               # probes + FINDINGS.md behind the JS-box design
 └─ components/
    ├─ jpy-notebook/              # the service lives here
    │  ├─ component.html          # tabs, cells, ANSI decoder, markdown subset
@@ -134,7 +187,7 @@ HTML sanitiser all live in it, with zero dependencies.
 node test/run-all.mjs
 ```
 
-Nine of the ten suites need a Jupyter server running (any one — the pack finds it). The tenth
+Twelve of the thirteen suites need a Jupyter server running (any one — the pack finds it). The tenth
 runs the pane script against a DOM shim and needs nothing. `test/README.md` has the details,
 including the one rule worth knowing before you add a suite: release every kernel you start.
 
